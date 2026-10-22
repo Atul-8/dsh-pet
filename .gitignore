@@ -29,6 +29,16 @@ node_modules/
 npm-debug.log*
 *.tgz
 
+# ── 本机运行日志 / 会话产物（本地观测数据，不入仓库） ──
+electron.log
+install.log
+standalone.log
+pet-shot.png
+shot.py
+
+# ── 锁文件口径：本项目用 pnpm（dsh-pet/pnpm-lock.yaml）；npm 误产的锁不入库 ──
+dsh-pet/package-lock.json
+
 # ── 临时/备份目录 ──
 temp/
 

@@ -28,15 +28,18 @@ import {
   readThrow,
   readLock,
   readWorkStatus,
+  readBadge,
   takeChanged,
   type PollState,
   type PositionMode,
   type SayCue,
   type LockState,
   type PetFacing,
+  type BadgeState,
 } from '../shared/state';
 import { WORK_STATUS_INDEX, type WorkStatusSnapshot } from '../shared/work-status';
 import { makeBalanceBubble, makeWhisperBubble } from './bubble';
+import { makeBadge } from './badge';
 import { clickScore, SCORE_MIN_SPEED, mountScorePopup, spawnScoreBurst } from '../shared/score-popup';
 import {
   CANVAS_H,
@@ -64,6 +67,7 @@ import {
 import { TOOLTIP_CLASS, TOOLTIP_CSS, TOOLTIP_GAP_RATIO, tooltipPlacement } from '../shared/tooltip';
 // 对话弹窗：与桌面共用同一份组件（数据经 host /chat 读写同一份记忆）
 import { mountChatDialog } from '../shared/chat';
+import { mountSizeDialog, type SizeDialogHandle } from '../shared/size';
 import { registerPose } from './pose';
 import { registerProgress } from './progress';
 // 字体（全局配置 font）：种类 → CSS 字体栈、字号 → 最终 px。换算只在 shared 一处，
@@ -178,6 +182,38 @@ function injectCss(): void {
 }
 
 /**
+ * 徽标在场时的弹窗落点级联（纯几何）：**脚下 → 身体左侧 → 身体右侧 → 脚下兜底**。
+ *
+ * 为什么需要级联：头顶是常驻徽标的位置，弹窗（对话输入框 / 调整大小滑杆）绝不能落头。
+ * 「脚下」在宠物被拖到/漫游到屏幕下沿时放不下——弹窗组件自身的视口夹取会把弹窗**拉回
+ * 宠物身上**，正好压住头顶徽标（实测复现的「对话弹窗盖住待处理徽标」就是这个路径）。
+ * 级联的每一级都保证离开头顶区：脚下放不下 → 放身体**左侧**（徽标在头顶中央，左侧同高
+ * 不碰）→ 再放不下放**右侧** → 全放不下（极小视口）才用回夹取（与旧版行为一致）。
+ *
+ * @param hit 宠物身体命中区（.dsh-pet-hit 的视口矩形，与气泡/对话弹窗同一定位源）
+ * @param w/h 弹窗的保守外框尺寸（判定放不放得下用；实际略小只会更宽松）
+ */
+function dialogAnchorAwayFromHead(hit: DOMRect, w: number, h: number): { x: number; y: number } {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const gap = 10;
+  // 1) 脚下：身体左缘对齐（用户偏好：会话放脚下）
+  if (hit.bottom + gap + h <= vh - 8) {
+    return { x: Math.max(8, Math.min(hit.left, vw - w - 8)), y: hit.bottom + gap };
+  }
+  // 2) 身体左侧（头同高）：徽标在头顶中央（宽约 0.2·size），左侧留不出头顶位但绝不重叠
+  if (hit.left - gap - w >= 8) {
+    return { x: hit.left - gap - w, y: Math.max(8, hit.top) };
+  }
+  // 3) 身体右侧（头同高）
+  if (hit.right + gap + w <= vw - 8) {
+    return { x: hit.right + gap, y: Math.max(8, hit.top) };
+  }
+  // 4) 兜底：脚下（交给弹窗组件夹回视口——极小视口的最后手段）
+  return { x: Math.max(8, Math.min(hit.left, vw - w - 8)), y: hit.bottom + gap };
+}
+
+/**
  * 制造宠物页面组件（工厂，与 makePetConfigSection 同理：react 由运行时注入）。
  * @param rt 运行时注入的 react 能力（h=jsx / useState / useEffect / useRef）
  * @returns PetMulti 多开容器组件（内部渲染多个 PetCard）
@@ -196,6 +232,8 @@ export function makePetUI(rt: {
   const BalanceBubble = makeBalanceBubble({ h, useState, useEffect });
   /** 碎碎念气泡（哑组件：文本与显隐由 PetCard 传入） */
   const WhisperBubble = makeWhisperBubble({ h });
+  /** 常驻计数徽标（哑组件：数据由 PetCard 传入；count>0 时常驻显示，与数据源无关） */
+  const Badge = makeBadge({ h });
 
   /** 单个宠物实例（配置由容器 PetMulti 传入；碎碎念轮询/触发/气泡完全自理） */
   function PetCard({
@@ -218,6 +256,7 @@ export function makePetUI(rt: {
     lockTick,
     menuItemsRef,
     arena,
+    badge,
   }: {
     cfg: RuntimePet;
     balance: BalanceState | null;
@@ -255,9 +294,8 @@ export function makePetUI(rt: {
      *  这里自己定时解除（见 shared/state.ts 的 readLock）。 */
     lock?: LockState;
     lockTick: number;
-    /** 第三方菜单项（/state 的 sections.menu 快照）。传 ref 而不是值：**只在右键那一刻**读，
-     *  注册表变化不需要重渲染任何宠物（菜单本来就是打开时现拼的）。 */
-    menuItemsRef: ReactNS.MutableRefObject<MenuMoreItem[]>;
+    /** 常驻计数徽标状态（通用）：容器从 S 的 sections.badge 分发下来，count>0 时渲染常驻徽标 */
+    badge: BadgeState | null;
     arena: ReactNS.MutableRefObject<{ slots: Record<string, PetCollisionSlot> }>;
   }) {
     // ---- 尺寸（由配置传入；容器/设置页更新后即时跟随）----
@@ -308,6 +346,9 @@ export function makePetUI(rt: {
     const menuRef = useRef<{ close: () => void } | null>(null);
     // 对话弹窗（与桌面共用 shared 组件）：当前挂载的 close() 句柄，卸载/重开前清理
     const chatRef = useRef<{ close: () => void } | null>(null);
+    // 「调整大小」滑杆浮层（shared 组件）：close() 句柄 + 打开时的原尺寸（取消路径的恢复值）
+    const sizeDlgRef = useRef<SizeDialogHandle | null>(null);
+    const sizeOrigRef = useRef<number | null>(null);
 
     // 配置变化即时跟随（容器重新合并 / 设置页保存后通过 petBridge.reload 触发）
     useEffect(() => {
@@ -629,7 +670,8 @@ export function makePetUI(rt: {
       },
       [],
     );
-    // 卸载时关闭可能开着的右键菜单与对话弹窗（挂载的 DOM 一并清理）
+    // 卸载时关闭可能开着的右键菜单、对话弹窗与大小浮层（挂载的 DOM 一并清理；
+    // 浮层若未确认会回调 onCancel→setSize，卸载中的 setState 是无害空操作）
     useEffect(
       () => () => {
         if (menuRef.current) {
@@ -639,6 +681,10 @@ export function makePetUI(rt: {
         if (chatRef.current) {
           chatRef.current.close();
           chatRef.current = null;
+        }
+        if (sizeDlgRef.current) {
+          sizeDlgRef.current.close();
+          sizeDlgRef.current = null;
         }
       },
       [],
@@ -2008,12 +2054,15 @@ export function makePetUI(rt: {
         // 桌宠在视频中间，视频框右上角 ≠ 宠物右上角），取身体右上角，超出视口自动夹回。
         if (chatRef.current) chatRef.current.close();
         const hitRect = stageRef.current?.querySelector('.dsh-pet-hit')?.getBoundingClientRect();
+        // 徽标在场 → 级联落点（脚下优先，头顶永不给弹窗让位——宠物在下沿时脚下放不下会夹回头顶，
+        // 级联改为放身体左侧/右侧）；无徽标 → 原头部右上定位不变
+        const chatAnchor = hitRect && badgeOn ? dialogAnchorAwayFromHead(hitRect, 340, 70) : null; // 340/70 = 输入框保守外框（最大宽 340）
         chatRef.current = mountChatDialog({
           petId: cfg.id,
           baseUrl: '/dsh-pet-7340/chat',
           surface: 'web',
-          x: hitRect ? hitRect.right + 6 : window.innerWidth - 256,
-          y: hitRect ? hitRect.top + 6 : 8,
+          x: chatAnchor ? chatAnchor.x : hitRect ? hitRect.right + 6 : window.innerWidth - 256,
+          y: chatAnchor ? chatAnchor.y : hitRect ? hitRect.top + 6 : 8,
           onSent: () => {
             // 发送成功：回复已写进 S → 版本号变 → 挂着的长轮询立刻返回并弹气泡（0 延迟）
             console.info('[dsh-pet] 对话已发送 pet=' + cfg.id);
@@ -2047,6 +2096,36 @@ export function makePetUI(rt: {
             petBridge.reload(body as Record<string, Record<string, unknown>>);
           })
           .catch((e: unknown) => console.warn('[dsh-pet] 显示位置切换失败', e));
+        return;
+      }
+      if (leaf.action === 'set-size') {
+        // 调整大小：滑杆浮层（shared 组件）——拖动实时预览（只改本地 state，不落盘），
+        // 确认后组件自己 POST /pet-size 写配置，成功回调里用返回的成品聚合 reload（当场生效 + 持久）。
+        // 打开前记住当前尺寸：取消/Esc/点外路径恢复它（预览不留痕）。
+        if (sizeDlgRef.current) sizeDlgRef.current.close();
+        const hitRect = stageRef.current?.querySelector('.dsh-pet-hit')?.getBoundingClientRect();
+        sizeOrigRef.current = size;
+        // 落点与对话弹窗同一条级联规则：徽标在场时头顶不让位（脚下 → 左侧 → 右侧）
+        const sizeAnchor = hitRect && badgeOn ? dialogAnchorAwayFromHead(hitRect, 232, 180) : null; // 232/180 = 滑杆浮层外框
+        sizeDlgRef.current = mountSizeDialog({
+          current: size,
+          x: sizeAnchor ? sizeAnchor.x : hitRect ? hitRect.right + 6 : window.innerWidth - 260,
+          y: sizeAnchor ? sizeAnchor.y : hitRect ? hitRect.top + 6 : 8,
+          baseUrl: '/dsh-pet-7340/pet-size',
+          petId: cfg.id,
+          // 实时预览：只动本地 state——宠物每帧跟着变大变小（fontPx/halfW/bottomPad 全随 size 派生）
+          onPreview: (n) => setSize(n),
+          // 保存成功：响应体就是改动后的成品聚合（与设置页保存/pet-display 同形），
+          // 交给 petBridge.reload 当场换新配置（size state 经 cfg.size 跟随效应同步到确认值）
+          onSaved: (aggregate) => {
+            console.info('[dsh-pet] 调整大小已保存 pet=' + cfg.id);
+            petBridge.reload(aggregate);
+          },
+          onCancel: () => {
+            // 恢复打开时的原尺寸（预览不留痕；保存失败路径用户点取消也走这里）
+            if (sizeOrigRef.current !== null) setSize(sizeOrigRef.current);
+          },
+        });
         return;
       }
       if (leaf.action === 'home') {
@@ -2085,6 +2164,70 @@ export function makePetUI(rt: {
       setAnim(leaf.anim);
       setCuePlayback(cuePlaybackId);
     };
+    // ---- 徽标关注循环（issue：有待处理时桌宠一直间歇提醒）----
+    // 徽标在场（count>0）期间：先 30s、之后每 100~160s（随机抖动，避免机械节拍感）随机播一个
+    // 一次性小动作 + 弹一条**脚边**提醒气泡（碎碎念同款槽位：徽标在场时气泡自动走 is-under 脚下
+    // 变体，头顶位始终归徽标）。与徽标自身的缓慢呼吸动画构成「视觉 + 动作」双通道。
+    // 礼貌守卫——以下任一情况**整轮跳过**（下一轮照常来，绝不打断用户正在进行的交互）：
+    // 第三方占用锁 / 工作状态非终态（正在播档位动画）/ 拖拽中 / 菜单·对话弹窗开着 /
+    // 碎碎念气泡正在显示（不打断它的话）/ 页面不可见（看不见就是白打扰）。
+    const badgeAttRef = useRef<BadgeState | null>(null);
+    badgeAttRef.current = badge;
+    const badgeAttTimerRef = useRef<number | null>(null);
+    useEffect(() => {
+      const active = (badge?.count ?? 0) > 0;
+      if (badgeAttTimerRef.current !== null) window.clearTimeout(badgeAttTimerRef.current);
+      badgeAttTimerRef.current = null;
+      if (!active) return;
+      const fire = () => {
+        const b = badgeAttRef.current;
+        if (!b || b.count <= 0) return; // 数据源清零：循环到此为止（badgeOn 翻转时 effect 也会重建）
+        const ws = workStatusRef.current;
+        const busy =
+          frozenRef.current ||
+          (ws !== null && ws.state !== 'success' && ws.state !== 'error') ||
+          dragRef.current.active ||
+          dragRef.current.dragging ||
+          menuRef.current !== null ||
+          chatRef.current !== null ||
+          whisperBubbleTimerRef.current !== null ||
+          document.hidden;
+        if (!busy) {
+          const act = pickCategoryAction(petAnims.categories, petAnims.idle, facingRef.current, animRef.current);
+          stopThrow();
+          stopMove();
+          setOnce(true);
+          setSeq((s) => s + 1);
+          setAnim(act.name);
+          setCuePlayback(null);
+          // 提醒气泡（8s 自动收起，与碎碎念同一定时器槽）
+          setWhisperText('主人~还有' + b.count + '条' + (b.label ?? '待处理') + '消息哟');
+          setWhisperImage(undefined);
+          setWhisperUrl(undefined);
+          setWhisperBubbleOn(true);
+          if (whisperBubbleTimerRef.current !== null) window.clearTimeout(whisperBubbleTimerRef.current);
+          whisperBubbleTimerRef.current = window.setTimeout(() => setWhisperBubbleOn(false), 8000);
+          console.log(
+            '[dsh-pet] ' +
+              new Date().toTimeString().slice(0, 8) +
+              ' 徽标关注 pet=' +
+              cfg.id +
+              ' -> [' +
+              act.id +
+              '] ' +
+              act.name,
+          );
+        }
+        badgeAttTimerRef.current = window.setTimeout(fire, 100_000 + Math.floor(Math.random() * 60_000));
+      };
+      badgeAttTimerRef.current = window.setTimeout(fire, 30_000);
+      return () => {
+        if (badgeAttTimerRef.current !== null) window.clearTimeout(badgeAttTimerRef.current);
+        badgeAttTimerRef.current = null;
+      };
+      // 依赖只有布尔值：徽标数据每 60s 刷新（ts 变化）不重建定时器，节拍不被喂食打断
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [(badge?.count ?? 0) > 0]);
     const handleContextMenu = (e: ReactNS.MouseEvent<HTMLDivElement>) => {
       // 工具项（查看余额 / 碎碎念 / 对话 / 回到初始位置，与桌面端同一套）+ 动作树（动作→分类→具体动画）。
       // 「查看余额」**无条件显示**（与桌面端一致）：即使该宠物关了 balanceEnabled 也能点——手动请求不受开关限制
@@ -2097,6 +2240,8 @@ export function makePetUI(rt: {
         { label: '碎碎念', action: 'whisper' },
         { label: '对话', action: 'chat' },
         { label: '回到初始位置', action: 'home' },
+        // 调整大小（滑杆实时预览 + 确认写配置）：本地交互，不需要宿主配合
+        { label: '调整大小', action: 'set-size' },
         // 显示位置（仅网页/仅桌面/两者/都不）：与桌面端注入**同一份**子菜单。
         // 改成不含 web 的值（仅桌面/都不）后，本宠物会随即从 visiblePets 里消失——字面意义上的"自己走掉"。
         displayMenuBranch(),
@@ -2154,9 +2299,16 @@ export function makePetUI(rt: {
       bubbleTimerRef.current = window.setTimeout(() => setBubbleOn(false), BUBBLE_DURATION_MS);
     };
     const workTerminal = workStatus?.state === 'success' || workStatus?.state === 'error';
+    // 徽标在场（待处理 > 0）时，气泡与弹窗统统改到**宠物脚下**：头顶是常驻徽标的位置，
+    // 气泡/对话输入框再锚头顶就是现场那个「待处理提醒弹窗跟对话弹窗重叠」的 bug。
+    // 气泡脚下弹要求屏幕下方有空间（宠物贴底时退回头顶——宁可短暂重叠，不出屏看不见）；
+    // 弹窗脚下弹由浮层自身做视口夹取，无需这里判空间。
+    const badgeOn = badge !== null && badge.count > 0;
+    const rootRectForBubble = rootRef.current?.getBoundingClientRect();
+    const bubbleBelow = badgeOn && (rootRectForBubble ? window.innerHeight - rootRectForBubble.bottom > 90 : true);
     const bubbleNode = (() => {
       if (workTerminal && workBubbleOn && workText && cfg.workStatusEnabled) {
-        return h(WhisperBubble, { text: workText, on: workBubbleOn });
+        return h(WhisperBubble, { text: workText, on: workBubbleOn, below: bubbleBelow });
       }
       if (whisperBubbleOn && whisperText) {
         // assetRoot：配图**按名称**取时去哪个表情包目录链取（种类独占 → 用户目录 → 包内），
@@ -2167,18 +2319,14 @@ export function makePetUI(rt: {
           url: whisperUrl,
           assetRoot: cfg.assetRoot,
           on: whisperBubbleOn,
+          below: bubbleBelow,
         });
       }
       if (bubbleOn && balance && (cfg.balanceEnabled || balanceManual)) {
-        return h(BalanceBubble, {
-          state: balance,
-          on: bubbleOn,
-          expanded: balanceExpanded,
-          onToggle: toggleBalanceDetail,
-        });
+        return h(BalanceBubble, { state: balance, on: bubbleOn, below: bubbleBelow });
       }
       if (workBubbleOn && workText && cfg.workStatusEnabled) {
-        return h(WhisperBubble, { text: workText, on: workBubbleOn });
+        return h(WhisperBubble, { text: workText, on: workBubbleOn, below: bubbleBelow });
       }
       return null;
     })();
@@ -2228,6 +2376,8 @@ export function makePetUI(rt: {
         // 碎碎念/对话气泡**不受 whisperEnabled 限制**（该字段只关自动周期轮询的触发，见上头
         // useEffect 的门控）；whisperText 只由 triggerWhisper 设置，所以说话气泡照常渲染。
         bubbleNode,
+        // 常驻计数徽标：独立于气泡单槽（不参与优先级），count>0 时始终可见
+        h(Badge, { state: badge }),
         h('div', {
           ref: stageRef,
           className: 'dsh-pet-stage',
@@ -2267,6 +2417,8 @@ export function makePetUI(rt: {
     // 这次余额是不是**用户手动要的**（host 在叶子里标 manual）：下发给各宠物，
     // 决定「关了 balanceEnabled 的宠物要不要也答复」——手动请求无条件弹，开关只关自动。
     const [balanceManual, setBalanceManual] = useState(false);
+    // 常驻计数徽标（通用）：容器统一轮询 /state 的 sections.badge，count>0 时各宠物渲染常驻徽标
+    const [badge, setBadge] = useState<BadgeState | null>(null);
     // 上次已提示的不可用原因（reason:provider）：自动轮询只在原因变化时再弹（判定在 src/shared，两端同一份）
     const noticeKeyRef = useRef<string | null>(null);
     // 余额结果 → 状态与气泡（周期刷新与手动触发**共用这一条路径**，避免各写一份后漂移）。
@@ -2425,9 +2577,9 @@ export function makePetUI(rt: {
           } else if (path === 'sections.notify') {
             // 系统通知（单槽：同一秒多条只留最后一条，由 host 决定）→ 弹 toast（内部有开关/聚焦/权限门）
             notifyFromFrame(leaf.data);
-          } else if (path === 'sections.menu') {
-            // 第三方菜单注册表快照：只更新 ref（菜单在右键那一刻现拼），不触发任何渲染
-            menuItemsRef.current = readMenuItems(leaf.data);
+          } else if (path === 'sections.badge') {
+            const hit = readBadge(leaf);
+            if (hit) setBadge(hit);
           } else if (path.startsWith('pets.') && path.endsWith('.say')) {
             // 说话叶子：路径形如 pets.<id>.say。宠物 id **允许含点号**，所以按前缀/后缀切片，
             // 绝不 split('.')（那会把 id 切碎、派发给不存在的宠物）。
@@ -2533,7 +2685,7 @@ export function makePetUI(rt: {
             throwCueTick,
             lock: lockRef.current[p.id],
             lockTick,
-            menuItemsRef,
+            badge,
             arena: arenaRef,
           }),
         )

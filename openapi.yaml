@@ -16,6 +16,11 @@ info:
     - `servers` 里的 `http://127.0.0.1:{port}` 是占位——`{port}` 就是 `ctx.webServer.port`，
       也就是 `dsh web` 启动时打印的地址（未显式指定端口时默认 3080）。
       插件本身不固定监听端口，只往宿主的 Web 服务上挂路由。
+    - **固定端口本地桥（v0.3.8+）**：宿主同时在 `127.0.0.1:7340`（被占顺延 7341~7344）常驻监听，
+      v0.3.9 起开放 `GET /state`、`POST /badge`、`POST /broadcast` 三个端点（其余 404）。给浏览器侧
+      脚本（油猴/自研扩展）与宿主侧本地工具（其他插件的事件适配器，如 seeed-ts 的 pet-bridge）
+      一个**不随 DSH 重启漂移**的固定投喂入口——DSH 端口每次重启都换，外部脚本不应依赖它。
+      同一暴露面口径：仅绑 127.0.0.1、无鉴权、徽标与气泡都是展示层信息。
     - 只监听 **127.0.0.1**，不对外网暴露，也**没有任何鉴权**：任何能访问本机该端口的进程都能调用。
       请勿把该端口转发/代理到公网。
     - 桌面半侧不走 HTTP，而是 `dsh-pet-bridge://` 自定义 scheme 经主进程管道转发到**同一个**
@@ -74,6 +79,14 @@ servers:
       port:
         default: "3080"
         description: DSH Web 服务实际监听的端口
+  - url: http://127.0.0.1:7340
+    description: |
+      固定端口本地桥（v0.3.8+，v0.3.9 起含 broadcast）：`127.0.0.1:7340`（被占顺延 7341~7344，只绑回环）。
+      **窄门**：只服务 `GET /dsh-pet-7340/state`、`POST /dsh-pet-7340/badge`、
+      `POST /dsh-pet-7340/broadcast`，其余路径一律 404。
+      用途：浏览器侧脚本（油猴/自研扩展）与宿主侧本地工具（其他插件的事件适配器）的
+      固定投喂入口——DSH Web 端口每次重启都会变，外部脚本不应依赖它；桥端口不变，
+      DSH 重启后链路自动恢复。语义与 DSH 路由**同一份实现**。
 
 tags:
   - name: State
@@ -210,68 +223,78 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
-  /dsh-pet-7340/work-status:
+  /dsh-pet-7340/badge:
     post:
       tags: [Action]
-      operationId: setWorkStatus
-      summary: 外部写入工作状态
+      operationId: setBadge
+      summary: 常驻计数徽标——第三方投喂「数字 + 可选富信息」，宠物头顶常驻显示
       description: |
-        给外部程序（Codex、脚本、其它插件）一个最小的状态写入点：
-        `POST` 设置固定外部槽 `api` 的档位，`DELETE` 清空回空闲。
+        **与数据源完全解耦**的通用投喂端点：任何外部工具（浏览器插件、油猴脚本、定时脚本……）
+        把一个非负整数（如「待处理工单数」「未读邮件数」）POST 进来，宿主写进 `sections.badge`，
+        网页端每只宠物头顶常驻一枚小药丸徽标，`count = 0` 自动隐藏。宿主不知道也不关心数据来自哪里。
 
-        - 只接受 6 个档位；`task` 可选，省略 = 保留上一次，`null` / 空串 = 清空。
-        - 不传 session/seq，不做多写者仲裁或租约；最后写入者生效。
-        - 外部槽与 DSH 会话一起参与现有优先级
-          （waiting > error > working > thinking > result > success）。
-        - `success` / `error` 的气泡 10 秒后自动收起，但状态本身不会自动清；
-          要回空闲必须显式 `DELETE`。
+        - **只读语义**：本端点只接收一个数字 + 展示信息，不访问任何外部系统，更不会对
+          外部系统做任何操作（不发送、不关闭、不指派、不删除）；
+        - **无需占用锁**：写的是全局段 `sections.badge`，不属于任何一只宠物的演出，不带 `?lock=`；
+        - 与气泡（`pets.<id>.say`）的分工：气泡是**瞬时**的（说一句就收），徽标是**常驻**的
+          （`count > 0` 就一直挂着）；
+        - 契约向后兼容：老的三字段 `{ count, label, ts }` 照常工作，富字段全部可选。
+
+        **校验**（`count` 非法直接 HTTP 400；富字段非法只是**丢弃该字段**，不报错、不影响 count）：
+
+        - `count` 必填，必须是非负整数（`"4"` 这类数字字符串会被 `Number()` 收敛）；
+          负数 / 小数 / 非数字 → `400`；
+        - `label` 可选：徽标前缀文案（如「待处理」）。`trim()` 后为空即丢弃；超过 32 字符截断；
+        - `href` 可选：点击徽标在**新标签页**打开的地址。只放行 `http` / `https`
+          （`javascript:` 之类的注入向量一律丢弃）；超过 512 字符截断；
+        - `tone` 可选：颜色档位 `red`（缺省）/ `orange` / `green` / `gray`，其余值丢弃；
+        - `items` 可选：悬停徽标显示的详情列表（如最新工单主题）。只收字符串元素，
+          每条截断到 120 字符、最多保留 20 条；
+        - `ts` 可选：上报时刻（毫秒时间戳）；缺省由宿主补 `Date.now()`。
+
+        渲染形态：`label + ' ' + count`（无 label 只显数字）；有 `href` 时点击新开标签页、
+        有 `items` 时悬停显示详情；仅**网页端**宠物渲染（桌面 Electron 形态暂不显示徽标）。
+
+        **跨域提示**：本插件不为此端点开 CORS。同源（DSH 页面内 `fetch`）天然可用；
+        跨源方请走浏览器扩展的特权请求（如 Tampermonkey 的 `GM_xmlhttpRequest` + `@connect`）。
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              type: object
-              required: [state]
-              properties:
-                state:
-                  type: string
-                  enum: [thinking, working, result, waiting, success, error]
-                task:
-                  description: |
-                    任务详情文案，气泡里显示。`trim()` 后最多 40 个码点；
-                    省略 = 保留原值，`null` 或空串 = 清空。
-                  oneOf:
-                    - type: string
-                    - type: "null"
+              $ref: "#/components/schemas/BadgeRequest"
+            examples:
+              minimal:
+                summary: 最小契约——只有一个数字（老用法，完全兼容）
+                value:
+                  count: 3
+              pending:
+                summary: 完整形态——待处理工单
+                value:
+                  count: 4
+                  label: 待处理
+                  href: https://desk.zoho.com/support/technical-support/tickets
+                  tone: red
+                  items:
+                    - 主题一：传感器质保
+                    - 主题二：发票补开
+              clear:
+                summary: 清零（徽标自动隐藏）
+                value:
+                  count: 0
       responses:
         "200":
-          description: 写入被接受；返回当前外部槽的状态与任务文案。
+          description: 已写进 `sections.badge`（读 `/state` 可见；渲染端 1 秒内自动更新）
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/WorkStatusSnapshot"
+                $ref: "#/components/schemas/OkResponse"
         "400":
-          description: JSON 非法 / state 未知 / task 类型不对或超过 40 个码点。
+          description: '请求体不是合法 JSON（`{ "error": "invalid JSON body" }`），或 count 非法（`{ "error": "count 必须是非负整数" }`）'
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
-        "405":
-          $ref: "#/components/responses/MethodNotAllowed"
-        "413":
-          description: 请求体超过 8 KiB。
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-    delete:
-      tags: [Action]
-      operationId: clearWorkStatus
-      summary: 清空外部写入的工作状态
-      description: 清掉外部槽 `api`，桌宠回空闲；幂等（没有外部槽也返回 204）。
-      responses:
-        "204":
-          description: 已清空（或本来就没有外部槽）。
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
 
@@ -1760,6 +1783,68 @@ paths:
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
 
+  /dsh-pet-7340/pet-size:
+    post:
+      tags: [Config]
+      operationId: setPetSize
+      summary: 改单只宠物的大小（右键「调整大小」滑杆的落盘端点）
+      description: |
+        按宠物 id 改它的 `size`（px，动画显示宽度），并返回改动后的成品聚合（与 `GET /config`
+        同一份）。**`/pet-display` 的同族端点**：单只快捷形式 + 层归属由宿主反查 + 白名单重建
+        + 写盘后异步重启桌面 Helper（size 变化 = 窗口尺寸变化，桌面端必须重建窗口才生效）。
+
+        浏览器端右键菜单「调整大小」的滑杆浮层（拖动实时预览 → 确认才调本端点）走它；桌面端
+        的等价入口是设置页「桌宠配置」或直接调本接口。`size` 合法区间 **40 ~ 1200**（含端点，
+        与滑杆 min/max 同一口径，常量 `PET_SIZE_MIN` / `PET_SIZE_MAX`）；小数四舍五入取整。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, size]
+              properties:
+                id:
+                  type: string
+                  description: 宠物实例 id（合并后全局唯一）
+                size:
+                  type: number
+                  minimum: 40
+                  maximum: 1200
+                  description: 目标尺寸（px）。非有限数字或越界 → `bad-size`；小数四舍五入存整
+            examples:
+              shrink:
+                summary: 把 main 调小到 300px
+                value:
+                  id: main
+                  size: 300
+      responses:
+        "200":
+          description: |
+            **改动成功** → 改动后的成品聚合（与 `GET /config` / `POST /pet-display` 同一份）；
+            **业务失败** → `{ ok: false, reason, message }`。两者都是 200，靠 body 区分
+            （成功体没有 `ok` 字段，失败体 `ok` 恒为 `false`）——与 `/pet-display` 同一口径。
+
+            `reason` 取值：`pet-required`（缺 `id`）、`bad-size`（`size` 缺失 / 非有限数字 /
+            越界）、`unknown-pet`（找不到这只宠物）、`bad-request`（该层宠物配置非法）、
+            `generate-error`（配置读取失败 / 写盘失败 / 条目配置文件找不到）。
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    additionalProperties:
+                      $ref: "#/components/schemas/PetConfigEntry"
+                  - $ref: "#/components/schemas/FailureResponse"
+        "400":
+          description: '请求体不是合法 JSON（`{ "error": "invalid JSON body" }`）——协议层错误，只有它是 400'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
   /dsh-pet-7340/config/meta:
     get:
       tags: [Config]
@@ -2423,7 +2508,7 @@ components:
         sections:
           type: object
           description: 全局段（所有端共享一份）
-          required: [balance, workStatus, notify, config]
+          required: [balance, workStatus, notify, config, badge]
           properties:
             balance:
               $ref: "#/components/schemas/BalanceLeaf"
@@ -2433,6 +2518,8 @@ components:
               $ref: "#/components/schemas/NotifyLeaf"
             config:
               $ref: "#/components/schemas/ConfigLeaf"
+            badge:
+              $ref: "#/components/schemas/BadgeLeaf"
         pets:
           type: object
           description: 每只宠物各自一份；键是宠物 id（**可含点号，勿切分**）
@@ -2486,6 +2573,17 @@ components:
               config:
                 counter: 1755000000600
                 data: {}
+              badge:
+                counter: 1755000000700
+                data:
+                  count: 4
+                  label: 待处理
+                  href: https://desk.zoho.com/support/technical-support/tickets
+                  tone: red
+                  items:
+                    - 主题一：传感器质保
+                    - 主题二：发票补开
+                  ts: 1755000000700
             pets:
               main:
                 say:
@@ -2725,6 +2823,103 @@ components:
           type: object
           description: 恒为 `{}`（空对象）。不要从这里读配置内容——去 `GET /config`。
           maxProperties: 0
+
+    BadgeLeaf:
+      type: object
+      required: [counter, data]
+      description: |
+        常驻计数徽标叶子。**唯一写方**：`POST /badge`（第三方投喂）。
+        消费端：网页端宠物渲染（`count > 0` 显示、`= 0` 隐藏）。
+      properties:
+        counter:
+          $ref: "#/components/schemas/Counter"
+        data:
+          description: "`BadgeState`；`null` = 从未写过（初始态）。"
+          oneOf:
+            - $ref: "#/components/schemas/BadgeState"
+            - type: "null"
+
+    BadgeState:
+      type: object
+      required: [count]
+      description: |
+        常驻计数徽标状态（通用契约，与数据源解耦）。富字段（`label` / `href` / `tone` / `items`）
+        全部可选、可缺省；`ts` 缺省时由宿主补投喂时刻。
+      properties:
+        count:
+          type: integer
+          minimum: 0
+          description: |
+            徽标数字（非负整数）。`= 0` 是合法值——数据照写，渲染层据此**隐藏**徽标。
+          example: 4
+        label:
+          type: string
+          maxLength: 32
+          description: 徽标前缀文案（如「待处理」「未读」）。显示形态 `label + ' ' + count`。
+          example: 待处理
+        ts:
+          type: integer
+          format: int64
+          description: 上报时刻（毫秒时间戳）。
+        href:
+          type: string
+          format: uri
+          maxLength: 512
+          description: |
+            点击徽标在**新标签页**打开的地址。只放行 `http` / `https`。
+          example: https://desk.zoho.com/support/technical-support/tickets
+        tone:
+          type: string
+          enum: [red, orange, green, gray]
+          description: 徽标颜色档位。缺省 `red`。
+          example: red
+        items:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            maxLength: 120
+          description: 悬停徽标显示的详情列表（如最新工单主题）。
+          example:
+            - 主题一：传感器质保
+            - 主题二：发票补开
+
+    BadgeRequest:
+      type: object
+      required: [count]
+      description: |
+        `POST /badge` 的请求体。`count` 非法 → HTTP 400；富字段非法只是丢弃该字段，
+        不报错、不影响 `count`。
+      properties:
+        count:
+          type: integer
+          minimum: 0
+          description: 非负整数。数字字符串（如 `"4"`）会被收敛。负数 / 小数 / 非数字 → `400`。
+          example: 4
+        label:
+          type: string
+          description: 徽标前缀文案。`trim()` 后为空即丢弃；超过 32 字符截断。
+          example: 待处理
+        ts:
+          type: integer
+          format: int64
+          description: 上报时刻（毫秒时间戳）；缺省由宿主补 `Date.now()`。
+        href:
+          type: string
+          description: 点击徽标打开的地址。只放行 `http` / `https`，其余丢弃；超过 512 字符截断。
+          example: https://desk.zoho.com/support/technical-support/tickets
+        tone:
+          type: string
+          enum: [red, orange, green, gray]
+          description: 颜色档位；其余值丢弃（回退缺省 `red`）。
+          example: red
+        items:
+          type: array
+          items:
+            type: string
+          description: 悬停详情列表。只收字符串元素（其余过滤），每条截断 120 字符、最多保留 20 条。
+          example:
+            - 主题一：传感器质保
 
     NotifyFrame:
       oneOf:

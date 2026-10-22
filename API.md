@@ -5,6 +5,11 @@ dsh-pet 的宿主半侧向 DSH 自己的 Web 服务注册了**一条前缀路由
 完整契约——参数、响应体、字段含义、错误码与示例——见根目录的 [`openapi.yaml`](openapi.yaml)。
 
 - **基址**：`http://127.0.0.1:<port>/dsh-pet-7340`，`<port>` 是 DSH Web 服务实际监听的端口
+- **固定端口桥（外部脚本/本地工具用）**：`http://127.0.0.1:7340/dsh-pet-7340`（被占顺延 7341~7344）——
+  DSH 的端口每次重启都会变，外部脚本别依赖它。桥**只开三个端点**：`GET /state`、`POST /badge`
+  与 `POST /broadcast`（其余 404），语义与 DSH 路由同一份实现；DSH 重启后桥端口不变，
+  投喂链路自动恢复。`/broadcast` 是给**宿主侧本地工具**（其他插件的事件适配器，如
+  seeed-ts 的 pet-bridge）喂文本气泡用的——与 `/badge` 同一性质：外部事件 → 展示层
 - **只监听 127.0.0.1，且没有鉴权**：任何能访问本机该端口的进程都能调用，请勿转发到公网
 
 ---
@@ -50,7 +55,20 @@ dsh-pet 的宿主半侧向 DSH 自己的 Web 服务注册了**一条前缀路由
 | `POST /dsh-pet-7340/chat?pet=` | 对桌宠说一句话并生成回复，同时写入对话记忆；响应带 `text`（配图时另有 `image`），同时照旧写进气泡 |
 | `POST /dsh-pet-7340/balance` | 立即刷新一次余额（可见效果同样是弹气泡 + 档位动画） |
 
-## 四、让它做动作
+## 四、常驻徽标
+
+| 接口 | 功能 |
+| --- | --- |
+| `POST /dsh-pet-7340/badge` | **第三方投喂计数徽标**：任意外部工具 POST `{ count, label?, ts?, href?, tone?, items? }`，写进 `sections.badge`，宠物头顶**常驻**小药丸（`count=0` 自动隐藏）。与数据源完全解耦——油猴、别的浏览器插件、脚本都行，只要照这份契约投 |
+
+- **与气泡的分工**：气泡（`/whisper`、`/broadcast`）是瞬时的，说一句就收；徽标是常驻的，`count > 0` 就一直挂着；
+- **富信息**（全可选，向后兼容）：`label` 前缀文案（≤32 字）、`href` 点击新开标签页（仅 http/https）、`tone` 颜色 `red/orange/green/gray`、`items` 悬停详情列表（≤20 条 ×120 字）；
+- **校验口径**：`count` 非负整数，非法直接 400；富字段非法只是丢弃该字段，不报错；
+- **无需占用锁**：全局段，不属于任何宠物的演出；
+- **跨域**：插件不开 CORS——同源 `fetch` 天然可用；跨源请走浏览器扩展特权请求（如 Tampermonkey `GM_xmlhttpRequest` + `@connect 127.0.0.1`）；
+- 桌面 Electron 形态暂不渲染徽标（仅网页端）。
+
+## 五、让它做动作
 
 | 接口 | 功能 |
 | --- | --- |
@@ -61,25 +79,15 @@ dsh-pet 的宿主半侧向 DSH 自己的 Web 服务注册了**一条前缀路由
 | `POST /dsh-pet-7340/position?pet=` | **位置控制**（需锁）：挪到归一化坐标，`mode` = 直接/弹簧/直线；不碰动画。额外回**夹取后**的 `x`/`y` |
 | `POST /dsh-pet-7340/throw?pet=` | **原生抛掷**（需锁）：给桌宠一个初速度让它飞出去（`angle` 度、`power` 倍率） |
 
-## 五、改配置与重载
+## 六、改配置与重载
 
 | 接口 | 功能 |
 | --- | --- |
 | `PUT /dsh-pet-7340/config` | 保存用户层配置（白名单重建，用户手写的精调字段会保留） |
 | `POST /dsh-pet-7340/config` | 用内置默认整份覆盖用户配置，即「恢复默认」 |
 | `POST /dsh-pet-7340/pet-display` | **改单只宠物的显示位置**（`web` / `desktop` / `both` / `none`），只传 `{ id, display }` |
+| `POST /dsh-pet-7340/pet-size` | **改单只宠物的大小**（px，`40 ~ 1200` 含端点，小数取整），只传 `{ id, size }`；右键「调整大小」滑杆确认后的落盘端点，响应 = 改动后的成品聚合 |
 | `POST /dsh-pet-7340/reload` | 重载桌面端（重启桌面宠物进程，按最新配置重建窗口） |
-
-## 六、第三方菜单项
-
-| 接口 | 功能 |
-| --- | --- |
-| `POST /dsh-pet-7340/menu/item` | **注册菜单项**（该 `owner` 的菜单项整体覆盖）：`{ owner, labels: ["弹弓","钓鱼"] }` |
-| `DELETE /dsh-pet-7340/menu/item?owner=` | **清除菜单项**（该 `owner` 的全部项，幂等）：回 `{ ok: true, removed: 2 }` |
-| `GET /dsh-pet-7340/menu/events?owner=&wait=` | **查询触发**（读取即清空，`wait` = 长轮询毫秒数）：回 `{ 弹弓: "main", 钓鱼: null }` |
-| `POST /dsh-pet-7340/menu/click` | 渲染端上报点击（**内部通道**，第三方不用调） |
-
-第三方菜单项统一收在右键菜单的**「更多」**下；只有一项时不显示 `owner` 那层。
 
 ## 七、素材
 
@@ -106,7 +114,7 @@ dsh-pet 的宿主半侧向 DSH 自己的 Web 服务注册了**一条前缀路由
 {
   "counter": 1755000000007,   // 整份 S 的版本号 = 最后一次写入的编号（顶层，不是叶子）
   "sections": {               // 全局段：所有端共享一份
-    "balance": {…}, "workStatus": {…}, "notify": {…}, "config": {…}
+    "balance": {…}, "workStatus": {…}, "notify": {…}, "config": {…}, "badge": {…}
   },
   "pets": {                   // 每只宠物各自一份；键是宠物 id（可含点号，勿切分）
     "main": { "say": {…}, "anim": {…}, "position": {…}, "throw": {…}, "lock": {…} }

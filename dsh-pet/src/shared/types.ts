@@ -8,6 +8,15 @@
 /** 支持的角落 */
 export type Corner = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
 
+/**
+ * 宠物 size（px，动画显示宽度）合法区间（含端点）。
+ * 读写两侧共用同一口径：右键「调整大小」滑杆的 min/max、POST /pet-size 的服务端校验
+ * 都引用这两个常量——区间改一处，两端一起变（写侧本可只要求 ≥1（mergePet 的 petNumber），
+ * 但「1px 宠物 / 十万 px 宠物」没有交互意义，滑杆场景下直接按 UI 可用区间收紧）。
+ */
+export const PET_SIZE_MIN = 40;
+export const PET_SIZE_MAX = 1200;
+
 /** 轴对齐矩形（左上角 + 宽高）。显示器工作区、窗口内容区、可视夹取区共用同一形状。 */
 export interface Rect {
   x: number;

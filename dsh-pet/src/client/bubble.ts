@@ -53,6 +53,13 @@ const bubbleCss = [
     'transform:translateX(-50%);border:calc(var(--f)*0.3736) solid transparent;' +
     'border-top-color:rgba(255,255,255,.92);border-bottom:none}',
   '.dsh-pet-bubble.is-on{opacity:1}',
+  // 脚下变体（is-under）：徽标在场（待处理 > 0）时气泡改到**宠物脚下**弹出——
+  // 头顶是常驻徽标的位置，两个都锚头顶会叠（实测：徽标 bottom 0.075·size vs 气泡 0.108·size，
+  // 单行气泡就有 ~0.03·size 的重叠带，多行更糟）。尾巴翻到盒子顶上指向上方宠物。
+  // 触发与回退逻辑在 pet.ts（脚下没空间时退回头顶，宁可短暂重叠也不出屏看不见）。
+  '.dsh-pet-bubble.is-under{bottom:auto;top:calc(100% + var(--dsh-pet-size)*0.03)}',
+  '.dsh-pet-bubble.is-under::after{bottom:auto;top:calc(var(--f)*-0.3736);' +
+    'border-top:none;border-bottom:calc(var(--f)*0.3736) solid rgba(255,255,255,.92)}',
   // 碎碎念变体：字号缩到余额气泡的 0.75（0.0455→0.034，即 ×0.7473）、宽度下限更窄（0.10 → 2.1978），
   // 上限与余额气泡相同；宽度取宽/折行的规则同 .dsh-pet-bubble（继承 width:max-content）
   '.dsh-pet-bubble.dsh-pet-whisper{font-size:calc(var(--f)*0.7473);' +
@@ -168,66 +175,17 @@ const BALANCE_FADE_MS = 250;
  */
 export function makeBalanceBubble(rt: {
   h: typeof jsx;
-  useState: <T>(init: T) => [T, Dispatch<SetStateAction<T>>];
-  // 用 React 命名空间类型而非 typeof（同 pet.ts：type-only import 的 hook 无法进入声明导出）
-  useEffect: (effect: ReactNS.EffectCallback, deps?: ReactNS.DependencyList) => void;
-}): (props: {
-  state: BalanceState;
-  on: boolean;
-  /** 目标形态（点一下切换） */
-  expanded: boolean;
-  /** 点击气泡：上层据此切换 expanded 并重置 10s 计时器 */
-  onToggle: () => void;
-}) => ReactNode {
-  const { h, useState, useEffect } = rt;
+}): (props: { state: BalanceState; on: boolean; below?: boolean }) => ReactNode {
+  const { h } = rt;
   injectBubbleCss();
 
-  return function BalanceBubble({
-    state,
-    on,
-    expanded,
-    onToggle,
-  }: {
-    state: BalanceState;
-    on: boolean;
-    expanded: boolean;
-    onToggle: () => void;
-  }) {
-    // 目标是 expanded，实际显示的是 full —— 两者分开是为了留出「先淡出、再换内容」的那 250ms。
-    const [full, setFull] = useState(false);
-    const [fading, setFading] = useState(false);
-    useEffect(() => {
-      if (expanded === full) return;
-      setFading(true);
-      const timer = window.setTimeout(() => {
-        setFull(expanded);
-        setFading(false);
-      }, BALANCE_FADE_MS);
-      return () => window.clearTimeout(timer);
-    }, [expanded, full]);
-
-    const rows = full ? balanceDetailView(state) : balanceBubbleView(state);
-    // 只有 windows 形态有三窗口读数可展开；money（账户余额）/ points（积分）与不可用状态
-    // 点开也没别的内容
-    const clickable = state.ok && state.shape === 'windows';
+  return function BalanceBubble({ state, on, below }: { state: BalanceState; on: boolean; below?: boolean }) {
+    const rows = balanceBubbleView(state);
     // 不可用状态（不支持/缺凭证/抓取失败）是**多行文字说明**：套用碎碎念的换行变体
     // （字号缩到 0.75、宽度下限更窄，多行说明更紧凑；折行现在已是气泡的通用行为）
     const wrap = state.ok ? '' : ' dsh-pet-whisper';
     return h('div', {
-      className:
-        'dsh-pet-bubble' +
-        wrap +
-        (on ? ' is-on' : '') +
-        (clickable ? ' is-clickable' : '') +
-        (full ? ' is-expanded' : '') +
-        (fading ? ' is-fading' : ''),
-      // 就地吞掉：宠物本体（.dsh-pet-hit）的点击/拖拽不能被这次点击碰到
-      onClick: clickable
-        ? (e: ReactNS.MouseEvent<HTMLDivElement>) => {
-            e.stopPropagation();
-            onToggle();
-          }
-        : undefined,
+      className: 'dsh-pet-bubble' + wrap + (below ? ' is-under' : '') + (on ? ' is-on' : ''),
       children: rowsToNodes(h, rows),
     });
   };
@@ -246,7 +204,14 @@ export function makeBalanceBubble(rt: {
  */
 export function makeWhisperBubble(rt: {
   h: typeof jsx;
-}): (props: { text: string; image?: string; url?: string; assetRoot?: string; on: boolean }) => ReactNode {
+}): (props: {
+  text: string;
+  image?: string;
+  url?: string;
+  assetRoot?: string;
+  on: boolean;
+  below?: boolean;
+}) => ReactNode {
   const { h } = rt;
   injectBubbleCss();
   injectMemeBubbleCss();
@@ -257,12 +222,14 @@ export function makeWhisperBubble(rt: {
     url,
     assetRoot,
     on,
+    below,
   }: {
     text: string;
     image?: string;
     url?: string;
     assetRoot?: string;
     on: boolean;
+    below?: boolean;
   }) {
     const rows = whisperBubbleView({ ok: true, text, ts: 0 });
     const key = String(image ?? '').trim();
@@ -272,7 +239,11 @@ export function makeWhisperBubble(rt: {
     // （名字恰好长得像地址时会判错）。
     const src = href || (key ? memeImageUrl(key, '/dsh-pet-7340', assetRoot) : '');
     return h('div', {
-      className: 'dsh-pet-bubble dsh-pet-whisper' + (src ? ' ' + MEME_BUBBLE_CLASS : '') + (on ? ' is-on' : ''),
+      className:
+        'dsh-pet-bubble dsh-pet-whisper' +
+        (below ? ' is-under' : '') +
+        (src ? ' ' + MEME_BUBBLE_CLASS : '') +
+        (on ? ' is-on' : ''),
       children: src
         ? [
             h('img', {

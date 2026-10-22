@@ -189,6 +189,56 @@ export function readWorkStatus(leaf: StateLeaf): WorkStatusSnapshot | null {
 }
 
 /**
+ * 常驻计数徽标状态（通用）：任意外部工具经 POST /badge 投喂进 S 的 sections.badge。
+ * `count` = 数字（非负整数）；`label` = 徽标前缀文案（可选，如「待处理」「未读」）；
+ * `ts` = 上报时刻（可选，毫秒时间戳）；`href` = 点击徽标打开的地址（可选，仅 http/https）；
+ * `tone` = 颜色档位（可选，red/orange/green/gray，默认红）；`items` = 悬停提示详情列表（可选）。
+ * 与数据源解耦：这里不知道 Zoho / 油猴，只认这份通用形状。形状非法 → null（消费端跳过这一拍）。
+ */
+export type BadgeTone = 'red' | 'orange' | 'green' | 'gray';
+
+export interface BadgeState {
+  count: number;
+  label?: string;
+  ts?: number;
+  href?: string;
+  tone?: BadgeTone;
+  items?: string[];
+}
+
+const BADGE_TONES: ReadonlySet<string> = new Set(['red', 'orange', 'green', 'gray']);
+
+/**
+ * 类型收窄：badge 叶子 → BadgeState（形状非法 / count 非法 → null）。
+ * 只信非负整数 count；label/href/tone/items 各按白名单收窄，其余一律丢弃。
+ */
+export function readBadge(leaf: StateLeaf): BadgeState | null {
+  if (!leaf.data || typeof leaf.data !== 'object') return null;
+  const d = leaf.data as {
+    count?: unknown;
+    label?: unknown;
+    ts?: unknown;
+    href?: unknown;
+    tone?: unknown;
+    items?: unknown;
+  };
+  if (typeof d.count !== 'number' || !Number.isFinite(d.count) || d.count < 0) return null;
+  const href = typeof d.href === 'string' && /^https?:\/\//i.test(d.href) ? d.href : undefined;
+  const tone = typeof d.tone === 'string' && BADGE_TONES.has(d.tone) ? (d.tone as BadgeTone) : undefined;
+  const items = Array.isArray(d.items)
+    ? d.items.filter((s): s is string => typeof s === 'string').slice(0, 20)
+    : undefined;
+  return {
+    count: Math.floor(d.count),
+    ...(typeof d.label === 'string' && d.label ? { label: d.label } : {}),
+    ...(typeof d.ts === 'number' && Number.isFinite(d.ts) ? { ts: d.ts } : {}),
+    ...(href ? { href } : {}),
+    ...(tone ? { tone } : {}),
+    ...(items && items.length ? { items } : {}),
+  };
+}
+
+/**
  * 朝向：`left` = 素材原样，`right` = 镜像（渲染端贴 `scaleX(-1)`）。
  * **与 host/anim.ts 的同名联合体是两份**——宿主不 import src/shared（同 `Corner`、`PositionMode`
  * 的处理方式），改动时两边要一起改。

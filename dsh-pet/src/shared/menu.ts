@@ -33,11 +33,12 @@ export interface MenuLeaf {
    * chat=打开对话弹窗；home=回到初始位置；reload=重载配置（桌面端专属：重启桌面 Helper，
    * 全部桌面宠物窗口按最新配置重建——浏览器端刷新页面即可，不注入此项）；
    * set-display=改这只宠物的显示位置（目标值见 display 字段；**两端都注入**——桌面端拿它把
-   * 宠物送走、浏览器端拿它把宠物送到桌面，菜单项统一由 displayMenuBranch() 提供）；
-   * third-party=第三方注册的菜单项（见 buildMoreBranch）——点击只把 (owner, label) 上报给宿主，
-   * 具体做什么由注册方自己决定。
+   * 宠物送走、浏览器端拿它把宠物送到桌面，菜单项统一由 displayMenuBranch() 提供）。
+   * set-size=打开「调整大小」滑杆浮层（**当前仅浏览器端注入**——桌面端窗口尺寸随 Helper
+   * 重启重建，右键就地改大小需要 sprite.js 端配套接入，浏览器先行；桌面端点不到这一项，
+   * 走设置页「桌宠配置」或 /pet-size 接口同样生效）。
    * 手动触发均不受 whisperEnabled 影响（该字段只关自动周期轮询） */
-  action?: 'open-site' | 'show-balance' | 'whisper' | 'chat' | 'home' | 'reload' | 'set-display' | 'third-party';
+  action?: 'open-site' | 'show-balance' | 'whisper' | 'chat' | 'home' | 'reload' | 'set-display' | 'set-size';
   /** set-display 的目标显示位置（与设置页「显示位置」下拉框同一套取值） */
   display?: PetDisplay;
   /** third-party：注册它的 owner（身份键，**只用于回传，不显示**）。同一个 owner 的项收在同一个

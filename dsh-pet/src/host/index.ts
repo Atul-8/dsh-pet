@@ -95,7 +95,12 @@
  */
 import { createReadStream, existsSync, fstatSync, readFileSync } from 'node:fs';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import {
+  createServer as createHttpServer,
+  type IncomingMessage,
+  type Server as HttpServer,
+  type ServerResponse,
+} from 'node:http';
 import { homedir } from 'node:os';
 import { join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -159,6 +164,7 @@ import {
   type HostNotifyFrame,
 } from './notify-events';
 import { profileNameFrom, storageEntries } from './storage-paths';
+import { PET_SIZE_MAX, PET_SIZE_MIN } from '../shared/types';
 import { parseStateWaitQuery, PollStateStore } from './state';
 import { composeSystemPrompt, petPersona } from './persona';
 import {
@@ -1444,6 +1450,90 @@ export function apply(ctx: any): void {
       return { kind: 'json', status: 200, obj: readAllConfig(configPaths) };
     }
 
+    // 单只宠物的大小（右键「调整大小」→ POST /pet-size）。
+    // 与 /pet-display 同一族「高频单项改动」端点：只收 id + size 两个参数，不要求调用方回传整段
+    // pets（读-改-写整层既容易误伤同层其它宠物，也拿不准该写哪一层——层归属由服务端反查，
+    // findPetInstance 的结果在 id 全局唯一的前提下没有歧义）。
+    // 写入语义与 PUT /config / /pet-display 完全一致：saveUserConfig 白名单重建 + existing 透传
+    // （用户手改的 whisperPrompt / memes 等非白名单字段不许被抹掉）。
+    // 成功响应体 = 改动后的成品聚合（调用方直接 petBridge.reload）；**失败一律 HTTP 200 + {ok:false,...}**
+    // （缺 id / size 越界 / 宠物不存在 / 写盘失败全是业务错误，与 pet-display 同一口径）。
+    if (rest === 'pet-size') {
+      if (method !== 'POST') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
+      const fail = (reason: string, message: string): RouteResult => ({
+        kind: 'json',
+        status: 200,
+        obj: { ok: false, reason, message },
+      });
+      let payload: { id?: unknown; size?: unknown };
+      try {
+        payload = JSON.parse(body ?? '') as { id?: unknown; size?: unknown };
+      } catch {
+        return { kind: 'json', status: 400, obj: { error: 'invalid JSON body' } };
+      }
+      const petId = typeof payload.id === 'string' ? payload.id.trim() : '';
+      // id 必填（与 9 条 `?pet=` 路由 / pet-display 同一对词汇：没给 → pet-required；不存在 → unknown-pet）
+      if (!petId) return fail('pet-required', 'pet 必填：要指定操作哪只桌宠');
+      // size 校验：有限数字 + 合法区间（读写同一口径：PET_SIZE_MIN/MAX 也用于右键滑杆的 min/max，
+      // 客户端滑杆正常发不出界外值，这里是防手写调用的最后一道闸）。
+      const n = Number(payload.size);
+      if (
+        payload.size === undefined ||
+        payload.size === null ||
+        !Number.isFinite(n) ||
+        n < PET_SIZE_MIN ||
+        n > PET_SIZE_MAX
+      ) {
+        return fail('bad-size', `size 必须是 ${PET_SIZE_MIN} ~ ${PET_SIZE_MAX} 之间的数字（px）`);
+      }
+      const nextSize = Math.round(n); // 配置语义是整数像素，滑杆 step=2 本就产整数
+      let merged: Record<string, Record<string, unknown>>;
+      try {
+        merged = readAllConfig(configPaths);
+      } catch (e) {
+        return fail('generate-error', e instanceof Error ? e.message : String(e));
+      }
+      const hit = findPetInstance(merged, petId);
+      if (!hit) return fail('unknown-pet', `没有这只桌宠：${petId}`);
+      // 目标层：main → 用户主配置；其余 → 文件宠物自己的配置（与 pet-display 完全同一段定位逻辑）
+      let layerPath: string;
+      let layerDir: string;
+      let existing: Record<string, unknown> | undefined;
+      if (hit.entry === 'main') {
+        layerPath = userConfigPath;
+        layerDir = userRoot;
+        existing = readUserConfig(configPaths);
+      } else {
+        const file = readPetConfigEntry(configPaths, hit.entry);
+        if (!file) {
+          return fail('generate-error', `宠物条目配置文件找不到：${hit.entry}`);
+        }
+        layerPath = file.path;
+        layerDir = petConfigDir;
+        existing = file.raw;
+      }
+      // 整段替换语义：必须带上**该层全部**宠物，只把目标那只的 size 换掉（漏掉别的 = 把它们删掉）
+      const layerPets = Array.isArray(hit.conf.pets) ? (hit.conf.pets as Record<string, unknown>[]) : [];
+      const pets = layerPets.map((p) => (String(p.id) === petId ? { ...p, size: nextSize } : p));
+      const clean = saveUserConfig({ pets }, existing);
+      if (!clean) return fail('bad-request', '宠物配置非法');
+      try {
+        await mkdir(layerDir, { recursive: true });
+        await writeFile(layerPath, JSON.stringify(clean, null, 2), 'utf8');
+      } catch (e) {
+        return fail('generate-error', e instanceof Error ? e.message : String(e));
+      }
+      // 配置变更信号（只在写盘成功之后）：浏览器端右键改 size 时桌面 Helper 不是发起方，
+      // 只能靠这个信号发现「配置被别处改过」——与 pet-display 写 sections.config 同一用途。
+      state.writeSection('config', {});
+      // size 变化对桌面端 = 窗口尺寸变化：必须重启 Helper 才能生效（窗口是按 DSH_PET_PETS 建的），
+      // 与保存 / pet-display 走同一条 syncDesktop（串行队列 + 等旧进程退出再起新的，不 await）。
+      void syncDesktop();
+      // 响应体 = 改动后的成品聚合（与 pet-display 同形）：调用方直接交给 petBridge.reload，
+      // 浏览器端当场换新 size——「确认后关浮层 + 宠物保持预览大小」的落点。
+      return { kind: 'json', status: 200, obj: readAllConfig(configPaths) };
+    }
+
     // 桌面端「重载配置」（右键菜单 → POST /reload）：重启桌面 Helper，全部桌面宠物窗口按最新配置重建。
     // 与保存走**同一条**重启路径（syncDesktop：串行队列 + 等旧进程真正退出再起新的），
     // 所以宠物数量 / display / size 的变化同样生效——渲染端就地重拉配置做不到这几项
@@ -1705,6 +1795,48 @@ export function apply(ctx: any): void {
       if (method !== 'POST') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
       await refreshBalance(true); // manual：用户主动要的，余额不可用时前端必弹文字说明
       // ok 只表示"这次刷新动作完成了"；余额本身是否可用在 S 的 data 里（ok:false 会弹文字说明气泡）
+      return { kind: 'json', status: 200, obj: { ok: true } };
+    }
+
+    // 常驻计数徽标（通用第三方投喂）：/dsh-pet-7340/badge（POST = 任意外部工具把一个「计数 +
+    // 可选富信息」投喂进来，写进 S 的 sections.badge，宠物头顶常驻显示）。
+    // **与数据源解耦**：本端点不知道 Zoho / 油猴，只认一份通用契约
+    //   { count, label?, ts?, href?, tone?, items? }——
+    // 以后换浏览器插件 / 换脚本 / 换任意数据源，只要照这个契约 POST 即可，插件这边不用改。
+    // **只读语义**：本端点只接收一个数字 + 展示信息，不访问任何外部系统，也不对外部系统做任何操作。
+    if (rest === 'badge') {
+      if (method !== 'POST') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(body ?? 'null');
+      } catch {
+        return { kind: 'json', status: 400, obj: { error: 'invalid JSON body' } };
+      }
+      const o = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
+      const count = Number(o.count);
+      // count 必须是非负整数；非法一律 400，不静默写坏叶子
+      if (!Number.isFinite(count) || count < 0 || Math.floor(count) !== count) {
+        return { kind: 'json', status: 400, obj: { error: 'count 必须是非负整数' } };
+      }
+      const label = typeof o.label === 'string' && o.label.trim() ? o.label.trim().slice(0, 32) : undefined;
+      const href = typeof o.href === 'string' && /^https?:\/\//i.test(o.href) ? o.href.slice(0, 512) : undefined;
+      const tone =
+        typeof o.tone === 'string' && ['red', 'orange', 'green', 'gray'].includes(o.tone) ? o.tone : undefined;
+      const items = Array.isArray(o.items)
+        ? o.items
+            .filter((s): s is string => typeof s === 'string')
+            .map((s) => s.slice(0, 120))
+            .slice(0, 20)
+        : undefined;
+      const ts = typeof o.ts === 'number' && Number.isFinite(o.ts) ? o.ts : Date.now();
+      state.writeSection('badge', {
+        count,
+        ...(label ? { label } : {}),
+        ...(href ? { href } : {}),
+        ...(tone ? { tone } : {}),
+        ...(items && items.length ? { items } : {}),
+        ts,
+      });
       return { kind: 'json', status: 200, obj: { ok: true } };
     }
 
@@ -2397,6 +2529,92 @@ export function apply(ctx: any): void {
       }),
     'dsh-pet: /dsh-pet-7340 asset route',
   );
+
+  // 固定端口本地桥（127.0.0.1:7340，被占则顺延 7341~7344）：给浏览器侧脚本（油猴/自研扩展）
+  // 与**宿主侧本地工具**（seeed-ts 等其他插件的文件监听适配器）一个**不随 DSH 重启漂移**的
+  // 固定投喂入口。DSH WebServer 的端口每次重启都会换（OS 随机分配），外部脚本不可能追着改——
+  // 本次现场就是它断的链（57925 → 62056，徽标数据停更）。
+  // 桥上只暴露三个**通用**端点（GET /state 轮询 + POST /badge 计数徽标 + POST /broadcast 文本气泡），
+  // 其余路由一概 404：桥是窄门，不是第二个宿主（素材/配置/动作端点不外开）。语义与 DSH WebServer
+  // 上的同名路由**完全同一份**（handlePetRoute 单一实现，桥只是多开一个门）。
+  // /broadcast 进白名单的原因：与 /badge 同一性质——外部事件 → 展示层文本，是「事件提醒流」
+  // 适配器（seeed-ts 内嵌 pet-bridge）唯一需要的写端点；它不带任何 seeed/Zoho 语义，
+  // 任何本地工具都能用（接口通用性原则与 /badge 一致）。
+  // 安全口径：仅绑 127.0.0.1；本机任意进程理论上都能 POST /badge /broadcast（写展示字段）——
+  // 影响面 = 徽标/气泡显示内容（cosmetic；href 已限 http/https 且新标签打开），与 DSH 端口上的
+  // 同名端点本就是同一暴露面，接受此权衡（本地回环 + 展示层数据 + 通用接口不带来源语义）。
+  ctx.effect(() => {
+    const BRIDGE_PORTS = [7340, 7341, 7342, 7343, 7344];
+    let server: HttpServer | undefined;
+    let settled = false;
+    const tryListen = (i: number): void => {
+      if (i >= BRIDGE_PORTS.length) {
+        ctx.logger?.warn?.('[dsh-pet] 本地桥端口 7340~7344 均被占用；外部脚本可临时用 DSH 端口（菜单可设）');
+        return;
+      }
+      const srv = createHttpServer((req, res) => {
+        void (async () => {
+          // 挂起等待（/state?timeout=）期间调用方断开：中止等待，别把等待者留到超时
+          const abort = new AbortController();
+          res.on('close', () => abort.abort());
+          try {
+            const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+            const path = decodeURIComponent(url.pathname);
+            const okPath =
+              path === ROUTE_PREFIX + '/state' ||
+              path === ROUTE_PREFIX + '/badge' ||
+              path === ROUTE_PREFIX + '/broadcast';
+            const okMethod =
+              (req.method === 'GET' && path === ROUTE_PREFIX + '/state') ||
+              (req.method === 'POST' && path === ROUTE_PREFIX + '/badge') ||
+              (req.method === 'POST' && path === ROUTE_PREFIX + '/broadcast');
+            if (!okPath || !okMethod) {
+              sendJson(
+                res,
+                404,
+                { error: 'bridge only serves GET /state, POST /badge and POST /broadcast' },
+                { 'cache-control': 'no-store' },
+              );
+              return;
+            }
+            const body = req.method === 'POST' ? await readBody(req) : undefined;
+            const result = await handlePetRoute(req.url ?? '/', req.method ?? 'GET', body, abort.signal);
+            if (result.kind === 'json') sendJson(res, result.status, result.obj, result.headers);
+            else if (result.kind === 'text') sendText(res, result.status, result.body);
+            else if (result.kind === 'none') {
+              /* 调用方已断开：不再写 */
+            } else {
+              // 桥不服务文件路由（正常到不了这里：三个白名单端点都返回 json）
+              sendJson(res, 404, { error: 'bridge only serves GET /state, POST /badge and POST /broadcast' });
+            }
+          } catch (e) {
+            if (!res.destroyed && !res.writableEnded) {
+              sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+            }
+          }
+        })();
+      });
+      srv.on('error', () => {
+        if (!settled) tryListen(i + 1); // 端口被占（EADDRINUSE）等：顺延试下一个
+      });
+      srv.listen(BRIDGE_PORTS[i], '127.0.0.1', () => {
+        if (settled) {
+          srv.close(); // 竞态兜底：只保留第一个成功监听的实例
+          return;
+        }
+        settled = true;
+        server = srv;
+        ctx.logger?.info?.(
+          `[dsh-pet] 本地桥已监听 http://127.0.0.1:${BRIDGE_PORTS[i]}（GET /state + POST /badge + POST /broadcast，固定端口不随 DSH 重启漂移）`,
+        );
+      });
+    };
+    tryListen(0);
+    return () => {
+      server?.close();
+      server = undefined;
+    };
+  }, 'dsh-pet: fixed-port local bridge (127.0.0.1:7340)');
 
   // 工作状态联动：监听 DSH 会话事件 → 聚合"当前活动状态"（WorkStatusStore → 展示快照）。
   // 消费的事件：turn/start、user/message（goal 续跑轮判定）、tool/call（update_goal 收尾判定）、
