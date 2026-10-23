@@ -34,6 +34,26 @@
 - `feed: "broadcast"` = 事件流（突发性，**永不判 stale**——只显示最后心跳时刻）
 - 改完保存即生效（看门狗 30s 内重读声明表，无需重启）
 
+## 内建源（不需要外部脚本）
+
+`builtin-webview` 类型（阶段三起）：**宿主自己跑的会话看门人**——cookie 落在
+Chromium persist 分区（宿主全程不碰密码），每 `intervalMs` 无窗口探活一次，
+活着就环回投喂；登录失效自动开登录窗（重新登录即恢复，不用重启）。
+
+```jsonc
+{
+  "type": "builtin-webview",
+  "id": "zoho-direct",
+  "feed": "badge",
+  "intervalMs": 60000,
+  "url": "https://desk.zoho.com/",
+}
+```
+
+- 需要**桌面模式开着**（Electron Helper 在跑才有会话能力；纯 web 用户配了会一直显示 unknown——环境事实，不是故障）
+- 徽标数字 v1 是哨兵值（看门人在岗 = 1）；真实 API 学习（自动抓真实待办数）见 ADR-002 v1.1
+- `intervalMs` 需 ≥5000（防打爆目标站点），缺省 60s
+
 ---
 
 ## ① claude-code（hooks）
