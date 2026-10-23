@@ -39,11 +39,16 @@ export const isValidSourceId = (id: string): boolean => id.length > 0 && id.leng
 
 /**
  * 一条**声明**（用户配置 sources[] 里的一项，校验后的形状）。
- * v1 只认 type:'external-push'（active 类型阶段三随适配器一起加）；
- * 其它 type 的条目**整条丢弃并告警**——注册表是 type 判别的，不认识的类型没有语义。
+ * type 判别：
+ *   - 'external-push'：外部脚本（油猴/seeed-ts），宿主只登记「期待」；
+ *   - 'builtin-webview'（阶段三）：宿主自跑的会话看门人——可见登录窗（persist 分区
+ *     落 cookie，不存密码）+ 学习到的 API + 无窗口 cookie-jar 轮询，经桥环回投喂。
+ *     适配器模块 = src/host/webview-source.ts；宿主侧它就是个「往桥上 POST 的调用方」，
+ *     与外部推送在注册表眼里不可区分（ADR-002 §3.1 的结构保证）。
+ * 其它 type 的条目**整条丢弃并告警**。
  */
 export interface SourceDecl {
-  type: string;
+  type: 'external-push' | 'builtin-webview';
   id: string;
   /** 喂哪个叶子：badge（徽标，周期性）/ broadcast（事件流，突发性） */
   feed: 'badge' | 'broadcast';
@@ -51,6 +56,10 @@ export interface SourceDecl {
   expectIntervalMs?: number;
   /** 手动停用（健康显示 disabled；心跳照记，恢复开关即恢复判定） */
   enabled?: boolean;
+  /** builtin-webview 专属：轮询间隔（ms，缺省 60s）；登录窗入口站点 */
+  intervalMs?: number;
+  /** builtin-webview 专属：目标站点根（登录窗开这里、API 学习也以它为域） */
+  url?: string;
 }
 
 /** 健康度（S 的 sections.sources.data.list 里一项的形状；shared/state.ts 有消费端副本） */
@@ -63,6 +72,8 @@ export interface SourceHealthEntry {
   lastSeen?: number;
   /** 声明的期待间隔（透传给消费端：前端可显示「期待 N 秒一拍」） */
   expectIntervalMs?: number;
+  /** active 源自报过期的原因（阶段三：登录失效等；设置页可直接展示） */
+  expiredReason?: string;
 }
 
 /** 读用户层声明：main-config.jsonc 顶层 `sources: [...]`（非法条目丢弃 + 告警，不炸加载）。
@@ -91,11 +102,14 @@ export function readSourceDecls(paths: ConfigPaths): SourceDecl[] {
     const type = typeof d.type === 'string' ? d.type.trim() : '';
     const id = typeof d.id === 'string' ? d.id.trim() : '';
     const feed = d.feed;
-    if (type !== 'external-push') {
+    // 阶段三起新增 active 类型：builtin-webview（宿主自跑的会话看门人，适配器在
+    // webview-source.ts）。校验与 external-push 同骨架，另收两个专属字段。
+    const knownTypes: readonly string[] = ['external-push', 'builtin-webview'];
+    if (!knownTypes.includes(type)) {
       // 前向兼容占位：认识的 active 类型（builtin-webview 等）阶段三实现；其余整条丢弃
       warnSourceOnce(
         `sources:${i}:type`,
-        `sources[${i}] 的 type「${type || '(空)'}」暂不支持，已丢弃（外部推送请写 external-push）`,
+        `sources[${i}] 的 type「${type || '(空)'}」暂不支持，已丢弃（外部推送 external-push / 内建看门人 builtin-webview）`,
       );
       return;
     }
@@ -122,11 +136,33 @@ export function readSourceDecls(paths: ConfigPaths): SourceDecl[] {
     if (enabled !== undefined && typeof enabled !== 'boolean') {
       warnSourceOnce(`sources:${i}:enabled`, `sources[${i}]「${id}」的 enabled 非布尔，已忽略`);
     }
-    const decl: SourceDecl = { type, id, feed };
+    // builtin-webview 专属：intervalMs（轮询节奏，≥5s 防打爆目标站点）与 url（站点根）
+    let intervalMs: number | undefined;
+    let url: string | undefined;
+    if (type === 'builtin-webview') {
+      const iv = d.intervalMs;
+      if (iv !== undefined && (!Number.isFinite(Number(iv)) || Number(iv) < 5000)) {
+        warnSourceOnce(
+          `sources:${i}:intervalMs`,
+          `sources[${i}]「${id}」的 intervalMs 非法（需 ≥5000 的有限数），已按缺省 60s`,
+        );
+      } else if (iv !== undefined) {
+        intervalMs = Math.floor(Number(iv));
+      }
+      const u = d.url;
+      if (typeof u === 'string' && /^https?:\/\//i.test(u.trim())) {
+        url = u.trim();
+      } else if (u !== undefined) {
+        warnSourceOnce(`sources:${i}:url`, `sources[${i}]「${id}」的 url 非法（需 http/https），已丢弃该字段`);
+      }
+    }
+    const decl: SourceDecl = { type: type as SourceDecl['type'], id, feed };
     if (interval !== undefined && Number.isFinite(Number(interval)) && Number(interval) >= 1000) {
       decl.expectIntervalMs = Math.floor(Number(interval));
     }
     if (typeof enabled === 'boolean') decl.enabled = enabled;
+    if (intervalMs !== undefined) decl.intervalMs = intervalMs;
+    if (url !== undefined) decl.url = url;
     seen.add(id);
     out.push(decl);
   });
@@ -166,6 +202,9 @@ export class SourceRegistry {
   private readonly lastSeen = new Map<string, number>();
   /** 匿名心跳（不带 source / 未声明 id）：只做统计展示，不参与健康判定 */
   anonymousLastSeen: number | undefined;
+  /** active 源的自报过期标记（ADR-002 阶段三：builtin-webview 登录失效等）。
+   *  内存态：登录窗里重新登录成功 → 心跳恢复 → 下一次 noteHeartbeat 清除标记。 */
+  private readonly activeExpired = new Map<string, string>();
 
   /** 记一次心跳。返回是否「可见状态变化」（调用方据此决定要不要立即刷叶子）。
    *  秒级去抖：同源 1s 内的重复 POST 完全忽略（不记也不报）——lastSeen 停在该秒的
@@ -188,7 +227,14 @@ export class SourceRegistry {
     const before = this.lastSeen.get(sourceId);
     if (before !== undefined && now - before < 1000) return false;
     this.lastSeen.set(sourceId, now);
+    // 心跳回来了 = 适配器自报的「登录失效」已解除（重新登录成功，桥环回到货）
+    if (this.activeExpired.delete(sourceId)) return true;
     return true;
+  }
+
+  /** active 源自报故障（阶段三 builtin-webview）：健康显示 expired + 原因（消费端可提示重登） */
+  markSourceExpired(id: string, reason: string): void {
+    this.activeExpired.set(id, reason);
   }
 
   /** 当前快照（判定 + 透传给消费端的形状） */
@@ -199,8 +245,10 @@ export class SourceRegistry {
         id: d.id,
         type: d.type,
         feed: d.feed,
-        health: computeHealth(d, seen, now),
+        // active 源：自报过期优先于一切时间判定（登录失效是事实，不是间隔推断）
+        health: this.activeExpired.has(d.id) ? 'expired' : computeHealth(d, seen, now),
       };
+      if (this.activeExpired.has(d.id)) entry.expiredReason = this.activeExpired.get(d.id);
       if (seen !== undefined) entry.lastSeen = seen;
       if (d.expectIntervalMs !== undefined) entry.expectIntervalMs = d.expectIntervalMs;
       return entry;

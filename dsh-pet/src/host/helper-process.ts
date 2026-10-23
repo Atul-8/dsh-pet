@@ -446,6 +446,8 @@ export class HelperProcess {
   private sendBridgeResponse(req: BridgeRequest, resp: BridgeResponse): void {
     const cb = typeof req.cb === 'string' && /^https?:[/][/]/.test(req.cb) ? req.cb : '';
     if (cb) {
+      // 顺手记下 helper 的回调服务器地址（host 主动调 helper 的 /invoke 用，见 invokeSource）
+      this.helperInvokeUrl = cb.replace(/\/respond$/, '/invoke');
       void fetch(cb, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -461,6 +463,33 @@ export class HelperProcess {
       child.stdin.write(BRIDGE_PREFIX + JSON.stringify(resp) + '\n');
     } catch {
       /* ignore */
+    }
+  }
+
+  /** helper 回调服务器的 /invoke 地址（从协议行的 cb 学习而来；未通信过 = undefined） */
+  declare private helperInvokeUrl?: string;
+
+  /**
+   * 宿主**主动调 helper**（ADR-002 阶段三 builtin-webview 看门人）：POST /invoke →
+   * main.js 的 invokeHandlers 表（source:probe / source:login-open）。
+   * 为什么走 helper 的回调服务器而不是 stdin：Electron 主进程收不到 piped stdin
+   * （electron#4218）——渲染端协议当年就为此改走 cb，反向调用同理。
+   * 未就绪（helper 没起 / 还没通过一次协议行学到地址）→ 返回 undefined，调用方自行退避。
+   */
+  async invokeSource(channel: string, payload: Record<string, unknown>): Promise<unknown | undefined> {
+    const url = this.helperInvokeUrl;
+    if (!url || !this.child) return undefined;
+    try {
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ channel, payload }),
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (!r.ok) return undefined;
+      return (await r.json()) as unknown;
+    } catch {
+      return undefined; // helper 重启中 / 回调服务器换了端口：静默，下一拍重新学
     }
   }
 

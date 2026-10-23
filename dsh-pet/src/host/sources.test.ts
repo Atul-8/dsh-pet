@@ -14,6 +14,7 @@ import {
   readSourceDecls,
   SourceRegistry,
   staleAfterMs,
+  type SourceDecl,
 } from './sources';
 import type { ConfigPaths } from './config';
 
@@ -63,7 +64,7 @@ describe('readSourceDecls —— 用户层声明表', () => {
       JSON.stringify({
         sources: [
           42,
-          { type: 'builtin-webview', id: 'future', feed: 'badge' },
+          { type: 'mqtt', id: 'future', feed: 'badge' },
           { type: 'external-push', id: '', feed: 'badge' },
           { type: 'external-push', id: 'a/b', feed: 'badge' },
           { type: 'external-push', id: 'ok-1', feed: 'nonsense' },
@@ -75,15 +76,48 @@ describe('readSourceDecls —— 用户层声明表', () => {
       }),
     );
     const decls = readSourceDecls(paths);
-    // 丢弃：42（非对象）、builtin-webview（类型未支持）、''（id 空）、a/b（文件名非法）、
-    // nonsense（feed）、重复 ok-1、ok-2 的第一个（interval<1000 整条进丢弃名单？不——
-    // interval 非法只丢字段不丢条目，所以 ok-2 第一条存活为事件型，第二条按重复丢弃）、
+    // 丢弃：42（非对象）、mqtt（类型未支持——阶段三起 builtin-webview 也认了，换 mqtt 当「未知类型」）、
+    // ''（id 空）、a/b（文件名非法）、nonsense（feed）、重复 ok-1、ok-2 的第一个
+    // （interval<1000 只丢字段不丢条目，所以 ok-2 第一条存活为事件型，第二条按重复丢弃）、
     // ok-3（enabled 非布尔丢字段，条目存活）
     assert.deepEqual(decls, [
       { type: 'external-push', id: 'ok-1', feed: 'badge' },
       { type: 'external-push', id: 'ok-2', feed: 'badge' },
       { type: 'external-push', id: 'ok-3', feed: 'badge' },
     ]);
+  });
+
+  // ---------- 阶段三：builtin-webview 声明（active 源） ----------
+
+  test('builtin-webview 声明合法读出：intervalMs / url 收窄，专属字段不进 external-push', () => {
+    writeUser(
+      paths,
+      JSON.stringify({
+        sources: [
+          {
+            type: 'builtin-webview',
+            id: 'zoho-direct',
+            feed: 'badge',
+            intervalMs: 30000,
+            url: 'https://desk.zoho.com/',
+          },
+          { type: 'builtin-webview', id: 'short', feed: 'badge', intervalMs: 500 }, // <5000 → 字段丢，按缺省 60s
+          { type: 'builtin-webview', id: 'bad-url', feed: 'badge', url: 'javascript:alert(1)' }, // 非法 → 丢字段
+        ],
+      }),
+    );
+    const decls = readSourceDecls(paths);
+    assert.equal(decls.length, 3);
+    assert.deepEqual(decls[0], {
+      type: 'builtin-webview',
+      id: 'zoho-direct',
+      feed: 'badge',
+      intervalMs: 30000,
+      url: 'https://desk.zoho.com/',
+    });
+    // intervalMs 非法 → 不带该字段（适配器用缺省 60s）；url 非法 → 不带（适配器按无 URL 退避）
+    assert.equal(decls[1].intervalMs, undefined);
+    assert.equal(decls[2].url, undefined);
   });
 
   test('sources 非数组 → 整段忽略', () => {
@@ -93,8 +127,8 @@ describe('readSourceDecls —— 用户层声明表', () => {
 });
 
 describe('computeHealth —— 判定矩阵（纯函数）', () => {
-  const decl = { type: 'external-push', id: 'x', feed: 'badge' as const, expectIntervalMs: 60000 };
-  const eventDecl = { type: 'external-push', id: 'y', feed: 'broadcast' as const };
+  const decl: SourceDecl = { type: 'external-push', id: 'x', feed: 'badge', expectIntervalMs: 60000 };
+  const eventDecl: SourceDecl = { type: 'external-push', id: 'y', feed: 'broadcast' };
 
   test('stale 阈值 = max(2×interval, 5min)：抖两倍不算断，下限兜秒级间隔', () => {
     assert.equal(staleAfterMs(1000), 300000); // 1s 间隔 → 5min 下限
@@ -121,7 +155,7 @@ describe('computeHealth —— 判定矩阵（纯函数）', () => {
 describe('SourceRegistry —— 心跳与快照', () => {
   test('命中声明 id → 刷 lastSeen；秒级去抖（变化检测只对 ≥1s 的间隔报 true）', () => {
     const r = new SourceRegistry();
-    const decls = [{ type: 'external-push', id: 'a', feed: 'badge' as const, expectIntervalMs: 60000 }];
+    const decls: SourceDecl[] = [{ type: 'external-push', id: 'a', feed: 'badge', expectIntervalMs: 60000 }];
     assert.equal(r.noteHeartbeat('a', 1000, decls), true); // 首次 → 变化
     assert.equal(r.noteHeartbeat('a', 1500, decls), false); // 0.5s 内 → 不算
     assert.equal(r.noteHeartbeat('a', 2100, decls), true); // ≥1s → 算
@@ -129,7 +163,7 @@ describe('SourceRegistry —— 心跳与快照', () => {
 
   test('匿名 / 未声明 id → anonymousLastSeen，健康列表不出现', () => {
     const r = new SourceRegistry();
-    const decls = [{ type: 'external-push', id: 'a', feed: 'badge' as const }];
+    const decls: SourceDecl[] = [{ type: 'external-push', id: 'a', feed: 'badge' }];
     r.noteHeartbeat(undefined, 1000, decls);
     r.noteHeartbeat('ghost', 2000, decls);
     const snap = r.snapshot(decls, 3000);
@@ -141,12 +175,41 @@ describe('SourceRegistry —— 心跳与快照', () => {
 
   test('快照透传 lastSeen / expectIntervalMs；disabled 源心跳照记', () => {
     const r = new SourceRegistry();
-    const decls = [{ type: 'external-push', id: 'a', feed: 'badge' as const, expectIntervalMs: 60000, enabled: false }];
+    const decls: SourceDecl[] = [
+      { type: 'external-push', id: 'a', feed: 'badge', expectIntervalMs: 60000, enabled: false },
+    ];
     r.noteHeartbeat('a', 5000, decls);
     const snap = r.snapshot(decls, 6000);
     assert.equal(snap.list[0].health, 'disabled');
     assert.equal(snap.list[0].lastSeen, 5000);
     assert.equal(snap.list[0].expectIntervalMs, 60000);
+  });
+
+  // ---------- 阶段三：active 源自报过期（markSourceExpired） ----------
+
+  test('markSourceExpired → 健康一票翻 expired + 原因透传；心跳回来即解除', () => {
+    const r = new SourceRegistry();
+    const decls: SourceDecl[] = [{ type: 'builtin-webview', id: 'w', feed: 'badge', intervalMs: 60000 }];
+    // 未心跳未自报 → unknown（active 源的初始态：看门人还没探过）
+    assert.equal(r.snapshot(decls, 1000).list[0].health, 'unknown');
+    // 看门人探到登录失效 → 自报过期
+    r.markSourceExpired('w', '登录失效（cookie 过期或被登出）');
+    const expired = r.snapshot(decls, 2000).list[0];
+    assert.equal(expired.health, 'expired');
+    assert.equal(expired.expiredReason, '登录失效（cookie 过期或被登出）');
+    // 用户在登录窗里重新登录 → 桥环回到货 → 心跳清除标记
+    r.noteHeartbeat('w', 3000, decls);
+    const recovered = r.snapshot(decls, 4000).list[0];
+    assert.equal(recovered.health, 'alive');
+    assert.equal(recovered.expiredReason, undefined);
+  });
+
+  test('自报过期优先于一切时间判定（即使心跳在阈值内也显示 expired——事实优先于推断）', () => {
+    const r = new SourceRegistry();
+    const decls: SourceDecl[] = [{ type: 'builtin-webview', id: 'w', feed: 'badge', intervalMs: 60000 }];
+    r.noteHeartbeat('w', 1000, decls); // 心跳很新
+    r.markSourceExpired('w', 'x');
+    assert.equal(r.snapshot(decls, 1100).list[0].health, 'expired');
   });
 });
 

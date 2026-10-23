@@ -113,6 +113,7 @@ import { generateChat, type ChatMemoryMessage } from './chat';
 import { configuredModel } from './model-selection';
 import { limitPool, pickMeme, readMemePool } from './memes';
 import { normalizeSourceField, readSourceDecls, SourceRegistry } from './sources';
+import { startWebviewSource, type WebviewSourceDeps, type WebviewSourceHandle } from './webview-source';
 import {
   decideBroadcast,
   decideBubbleClear,
@@ -2893,6 +2894,61 @@ export function apply(ctx: any): void {
       if (timer !== null) clearTimeout(timer);
     };
   }, 'dsh-pet: sources watchdog');
+
+  // builtin-webview 源（ADR-002 阶段三，active 适配器）：声明表里的每个 builtin-webview
+  // 条目起一个「会话看门人」循环——无窗口探活 persist 分区 cookie → 活则桥环回投喂 /
+  // 失效则自报 expired 并开登录窗。适配器与外部推送在宿主眼里不可区分（都 POST 桥）。
+  // Helper 不在（纯 web 用户 / 桌面模式未启用）→ sendToHelper 恒 undefined → tick 静默退避：
+  // 健康保持 unknown，等桌面模式上线自然接管。停用（enabled:false）→ 不启动循环。
+  // 重读声明每 5 分钟一拍：用户改了 sources 配置，新源/改间隔/删除自然跟上（对齐 sources
+  // watchdog 的「声明表每拍重读」口径；这里拍长一点——启动/停止循环不是秒级需求）。
+  ctx.effect(() => {
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    /** id → 看门人句柄（声明消失 = stop；声明仍在 = 保留，等下一拍比对） */
+    const handles = new Map<string, WebviewSourceHandle>();
+    const deps: WebviewSourceDeps = {
+      // 桥环回地址：固定端口本地桥（127.0.0.1:7340，被占顺延 7341+）。看门人与油猴
+      // 同一门进——校验/心跳/写 S 全走同一条路径（ADR-002 §3.1 的结构保证）。
+      bridgeOrigin: 'http://127.0.0.1:7340',
+      sendToHelper: (channel, payload) => (helper ? helper.invokeSource(channel, payload) : Promise.resolve(undefined)),
+      markSourceExpired: (id, reason) => {
+        sourceRegistry.markSourceExpired(id, reason);
+        refreshSourcesLeaf(); // expired 是可见状态变化：立即上屏，不等下一拍
+      },
+      logger: ctx.logger,
+    };
+    function tick(): void {
+      if (disposed) return;
+      try {
+        const decls = readSourceDecls(configPaths).filter((d) => d.type === 'builtin-webview' && d.enabled !== false);
+        const live = new Set(decls.map((d) => d.id));
+        // 停掉已删除/停用的循环
+        for (const [id, h] of handles) {
+          if (!live.has(id)) {
+            h.stop();
+            handles.delete(id);
+          }
+        }
+        // 起新循环（已存在的跳过——间隔改动等下一拍 restart，v1 不做热改）
+        for (const d of decls) {
+          if (handles.has(d.id)) continue;
+          handles.set(d.id, startWebviewSource(d, deps));
+        }
+      } catch {
+        // 用户层读不动等：本拍跳过（与 refreshSourcesLeaf 同一口径——观测增强绝不炸链路）
+      }
+      timer = setTimeout(tick, 300_000);
+      timer.unref?.();
+    }
+    tick();
+    return () => {
+      disposed = true;
+      if (timer !== null) clearTimeout(timer);
+      for (const h of handles.values()) h.stop();
+      handles.clear();
+    };
+  }, 'dsh-pet: builtin-webview sources');
 
   // 碎碎念周期：host 侧调度（前端不再有任何碎碎念定时器）。
   // 一拍 = 读一次配置 + 给"到点"的宠物各生成一句；下一拍按**最短周期**排（多数部署只有一个

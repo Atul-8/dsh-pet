@@ -610,11 +610,18 @@ function bridgeResolve(resp) {
   p.resolve(resp);
 }
 
-/** 本地回调服务器：宿主把应答 POST 到这里（127.0.0.1 随机端口，绕开 stdin/DSH 闸门） */
+/** 本地回调服务器：宿主把应答 POST 到这里（127.0.0.1 随机端口，绕开 stdin/DSH 闸门）。
+ *  双路由：
+ *    - POST /respond：宿主对渲染端请求的应答（原通道，bridgeResolve 派发）；
+ *    - POST /invoke：**宿主主动调本进程**（ADR-002 阶段三 builtin-webview 看门人）——
+ *      body = { channel: 'source:probe' | 'source:login-open', payload }，经
+ *      ipcMain.invoke 同名 handler 应答（本函数定义在下方 ipcMain 区）。为什么走
+ *      HTTP 而不是 stdin：Electron 主进程收不到 piped stdin（electron#4218，
+ *      helper-process.ts 的注释）——渲染端协议当年就是为此改走 cb 的，反向调用同理。 */
 function startBridgeCallback() {
   const http = require('node:http');
   const server = http.createServer((req, res) => {
-    if (req.method !== 'POST' || req.url !== '/respond') {
+    if (req.method !== 'POST') {
       res.writeHead(404, { 'content-type': 'text/plain' });
       res.end('dsh-pet: not found');
       return;
@@ -622,14 +629,47 @@ function startBridgeCallback() {
     let raw = '';
     req.on('data', (c) => (raw += c));
     req.on('end', () => {
-      try {
-        bridgeResolve(JSON.parse(raw));
-        res.writeHead(200, { 'content-type': 'text/plain' });
-        res.end('ok');
-      } catch {
-        res.writeHead(400, { 'content-type': 'text/plain' });
-        res.end('dsh-pet: bad payload');
+      if (req.url === '/respond') {
+        try {
+          bridgeResolve(JSON.parse(raw));
+          res.writeHead(200, { 'content-type': 'text/plain' });
+          res.end('ok');
+        } catch {
+          res.writeHead(400, { 'content-type': 'text/plain' });
+          res.end('dsh-pet: bad payload');
+        }
+        return;
       }
+      if (req.url === '/invoke') {
+        try {
+          const { channel, payload } = JSON.parse(raw);
+          if (typeof channel !== 'string' || !/^source:/.test(channel)) {
+            res.writeHead(400, { 'content-type': 'text/plain' });
+            res.end('dsh-pet: bad channel');
+            return;
+          }
+          Promise.resolve()
+            .then(() => {
+              const h = invokeHandlers.get(channel);
+              if (!h) throw new Error('no handler: ' + channel);
+              return h(payload);
+            })
+            .then((result) => {
+              res.writeHead(200, { 'content-type': 'application/json' });
+              res.end(JSON.stringify(result ?? { ok: true }));
+            })
+            .catch((e) => {
+              res.writeHead(200, { 'content-type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, reason: String(e && e.message ? e.message : e) }));
+            });
+        } catch {
+          res.writeHead(400, { 'content-type': 'text/plain' });
+          res.end('dsh-pet: bad payload');
+        }
+        return;
+      }
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('dsh-pet: not found');
     });
     req.on('error', () => {
       res.writeHead(400, { 'content-type': 'text/plain' });
@@ -975,10 +1015,81 @@ app.whenReady().then(() => {
     openSite(url);
   });
 
+  // ---------- builtin-webview 源看门人（ADR-002 阶段三）：登录窗 + 无窗口探活 ----------
+  //
+  // 宿主的 webview-source.ts 经 helper 的 /invoke HTTP 路由把请求递进来（下方
+  // invokeHandlers 表，注册进回调服务器 startBridgeCallback）：
+  //   - `source:probe`：无窗口探活——在 persist 分区 `persist:dsh-pet-source-<id>` 里
+  //     fetch 登录页 URL，看响应是否像「已登录」（302 → 登录页 = 失效；200 = 活）。
+  //     cookie 由分区自动携带；**本进程不读 cookie 明文**（拿到的只有状态码事实）。
+  //   - `source:login-open`：开一个**可见的普通浏览器窗口**（框架/任务栏/可交互），
+  //     用户交互式登录（可过 2FA）。会话用同一个 persist 分区 → 登录成果直接落盘，
+  //     关窗后下一拍探活即恢复。**绝不存密码**：凭证只在 Chromium 会话里。
+  //
+  // 窗口表：sourceId -> BrowserWindow（重复请求只 focus 已有窗口）
+  const sourceLoginWins = new Map();
+  const sourcePartitions = (id) => 'persist:dsh-pet-source-' + String(id).replace(/[^a-zA-Z0-9_-]/g, '-');
+  /** source:* 通道 → 处理器（/invoke 路由按 channel 查表调用） */
+  const invokeHandlers = new Map();
+
+  invokeHandlers.set('source:probe', async (payload) => {
+    const id = payload && typeof payload === 'object' ? String(payload.id || '') : '';
+    const url = payload && typeof payload === 'object' ? String(payload.url || '') : '';
+    if (!id || !/^https?:[/][/]/.test(url)) return { ok: false, reason: 'bad-request' };
+    try {
+      // 无窗口 fetch：session.fromPartition 拿到该源的持久会话（cookie 自动带）。
+      // redirects: 'manual' —— 目标站多半是「登录页 302」，跟到底反而拿到的是登录页 200，
+      // 误判成已登录；停在第 302 那一跳才看得见「被踢去登录」这个事实。
+      const session = electronApi.session.fromPartition(sourcePartitions(id));
+      const r = await session.fetch(url, { redirect: 'manual', timeout: 15000 });
+      // 3xx 且 Location 指向常见登录路径 → 判失效；200/204 → 活；其余（5xx 等）→ 不确定，
+      // 按「探活失败」处理（宿主会静默退避下一拍再试，不误报 expired）
+      if (r.status >= 300 && r.status < 400) {
+        const loc = String(r.headers['location'] ?? '');
+        return { ok: true, authed: /login|signin|sso|auth/i.test(loc) ? false : undefined };
+      }
+      if (r.status === 200 || r.status === 204) return { ok: true, authed: true };
+      return { ok: true, authed: undefined, status: r.status };
+    } catch (e) {
+      return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
+  invokeHandlers.set('source:login-open', async (payload) => {
+    const id = payload && typeof payload === 'object' ? String(payload.id || '') : '';
+    const url = payload && typeof payload === 'object' ? String(payload.url || '') : '';
+    if (!id || !/^https?:[/][/]/.test(url)) return { ok: false };
+    const existed = sourceLoginWins.get(id);
+    if (existed && !existed.isDestroyed()) {
+      existed.focus();
+      return { ok: true, reused: true };
+    }
+    // 登录窗 = 普通浏览器窗口（与宠物窗完全不同的形态：有框架、进任务栏、可最大化）。
+    // partition 与探活同源 → 登录成果直接落进持久分区，关窗即完成。
+    const win = new BrowserWindow({
+      width: 1100,
+      height: 800,
+      show: true,
+      title: '登录数据源（cookie 只存本机，宿主不碰密码）',
+      webPreferences: {
+        partition: sourcePartitions(id),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        spellcheck: false,
+      },
+    });
+    sourceLoginWins.set(id, win);
+    win.on('closed', () => sourceLoginWins.delete(id));
+    // 用户登录成功后探活会翻绿，宿主下一拍自然恢复投喂——不需要「登录完成」回调
+    //（关闭窗口本身即可：persist 分区已持有新 cookie）。
+    await win.loadURL(url);
+    return { ok: true };
+  });
+
   // 显示器热更新：分辨率/缩放变化、插拔屏、旋转都会让桌面几何失效。原先几何只在
   // createPetWindows() 算一次并经 URL query 注入，渲染端 VIEW 是模块顶层常量，运行期永不更新——
   // 表现为「改了分辨率后可移动范围还是旧的」。这里重算并推给所有窗口，渲染端就地重挂。
-  let displaysTimer = null;
   const pushDisplays = () => {
     const geo = deskGeometry();
     lastRequestedBounds.clear(); // 坐标系变了，去重缓存作废，下一帧必须真的重设一次
