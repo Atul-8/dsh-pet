@@ -204,6 +204,9 @@ export interface BadgeState {
   href?: string;
   tone?: BadgeTone;
   items?: string[];
+  /** 投喂方自报的来源 id（ADR-002，可选）：用于健康联动——该 id 在 sections.sources 里
+   *  判 stale/expired 时，渲染端把徽标降为 gray。匿名（无 source）永不降色。 */
+  source?: string;
 }
 
 const BADGE_TONES: ReadonlySet<string> = new Set(['red', 'orange', 'green', 'gray']);
@@ -221,6 +224,7 @@ export function readBadge(leaf: StateLeaf): BadgeState | null {
     href?: unknown;
     tone?: unknown;
     items?: unknown;
+    source?: unknown;
   };
   if (typeof d.count !== 'number' || !Number.isFinite(d.count) || d.count < 0) return null;
   const href = typeof d.href === 'string' && /^https?:\/\//i.test(d.href) ? d.href : undefined;
@@ -228,6 +232,7 @@ export function readBadge(leaf: StateLeaf): BadgeState | null {
   const items = Array.isArray(d.items)
     ? d.items.filter((s): s is string => typeof s === 'string').slice(0, 20)
     : undefined;
+  const source = typeof d.source === 'string' && d.source.trim() && d.source.length <= 64 ? d.source : undefined;
   return {
     count: Math.floor(d.count),
     ...(typeof d.label === 'string' && d.label ? { label: d.label } : {}),
@@ -235,7 +240,68 @@ export function readBadge(leaf: StateLeaf): BadgeState | null {
     ...(href ? { href } : {}),
     ...(tone ? { tone } : {}),
     ...(items && items.length ? { items } : {}),
+    ...(source ? { source } : {}),
   };
+}
+
+/** 数据源健康度（sections.sources.data.list 一项的形状；host/sources.ts 的同名类型是两份——
+ *  host 不 import src/shared（同 Corner/PetFacing 的处理方式），改动时两边要一起改）。 */
+export interface SourceHealthEntry {
+  id: string;
+  type: string;
+  feed: string;
+  health: 'alive' | 'stale' | 'unknown' | 'expired' | 'disabled';
+  lastSeen?: number;
+  expectIntervalMs?: number;
+}
+
+/** sections.sources 叶子的消费端形状（readSources 收窄后） */
+export interface SourcesSnapshot {
+  list: SourceHealthEntry[];
+  /** 匿名心跳（不带 source 的投喂）：统计性信息，不参与健康判定 */
+  anonymousLastSeen?: number;
+}
+
+const SOURCE_HEALTHS: ReadonlySet<string> = new Set(['alive', 'stale', 'unknown', 'expired', 'disabled']);
+
+/**
+ * 类型收窄：sources 叶子 → SourcesSnapshot（形状非法 → null，消费端跳过这一拍）。
+ * 只认 list: Array<{ id, type, feed, health }>`；lastSeen / expectIntervalMs 各按形状收窄。
+ */
+export function readSources(leaf: StateLeaf): SourcesSnapshot | null {
+  if (!leaf.data || typeof leaf.data !== 'object') return null;
+  const d = leaf.data as { list?: unknown; anonymousLastSeen?: unknown };
+  if (!Array.isArray(d.list)) return null;
+  const list: SourceHealthEntry[] = [];
+  for (const item of d.list) {
+    if (!item || typeof item !== 'object') continue;
+    const e = item as {
+      id?: unknown;
+      type?: unknown;
+      feed?: unknown;
+      health?: unknown;
+      lastSeen?: unknown;
+      expectIntervalMs?: unknown;
+    };
+    if (typeof e.id !== 'string' || !e.id) continue;
+    if (typeof e.health !== 'string' || !SOURCE_HEALTHS.has(e.health)) continue;
+    const entry: SourceHealthEntry = {
+      id: e.id,
+      type: typeof e.type === 'string' ? e.type : '',
+      feed: typeof e.feed === 'string' ? e.feed : '',
+      health: e.health as SourceHealthEntry['health'],
+    };
+    if (typeof e.lastSeen === 'number' && Number.isFinite(e.lastSeen)) entry.lastSeen = e.lastSeen;
+    if (typeof e.expectIntervalMs === 'number' && Number.isFinite(e.expectIntervalMs)) {
+      entry.expectIntervalMs = e.expectIntervalMs;
+    }
+    list.push(entry);
+  }
+  const anon =
+    typeof d.anonymousLastSeen === 'number' && Number.isFinite(d.anonymousLastSeen)
+      ? { anonymousLastSeen: d.anonymousLastSeen }
+      : {};
+  return { list, ...anon };
 }
 
 /**

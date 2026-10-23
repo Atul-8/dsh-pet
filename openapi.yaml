@@ -114,7 +114,10 @@ paths:
             "balance":    { "counter": 1755000000000, "data": { /* BalanceState */ } },
             "workStatus": { "counter": 1755000000001, "data": { /* WorkStatusSnapshot */ } },
             "notify":     { "counter": 1755000000002, "data": { /* NotifyFrame */ } },
-            "config":     { "counter": 1755000000007, "data": {} }
+            "config":     { "counter": 1755000000007, "data": {} },
+            "badge":      { "counter": 1755000000008, "data": { /* BadgeState */ } },
+            "menu":       { "counter": 1755000000009, "data": { /* owner → labels */ } },
+            "sources":    { "counter": 1755000000010, "data": { /* SourcesSnapshot */ } }
           },
           "pets": {
             "main": {
@@ -152,6 +155,10 @@ paths:
           保存 / 同步配置（`PUT` / `POST /config`）**不写它**：它们的调用方自己就拿到了成品聚合。
           **用户手工编辑 `main-config.jsonc` / `pet/*.json` 不会被感知**——宿主不再读盘比对 mtime
           （那等于每拍读一次盘），改完需要重载。
+        - **`sections.sources` 是数据源健康快照**（ADR-002）：看门狗每 30s 一拍 + 心跳到达即时刷。
+          `data` 形状见 `SourcesSnapshot`（`list: SourceHealthEntry[]` + `anonymousLastSeen`）。
+          **内容变化才写**（健康度翻转 / lastSeen 刷新）——每 30s 的心跳时刻更新没有消费价值，
+          健康度变化才有。渲染端（徽标降色）以它为唯一判据来源。
         - **`counter` 是整份 S 的版本号**（顶层，**不是叶子**）：它就是"最后一次写入的编号"。
           把它回传成 `?since=` 表达"我手里这份是哪个版本"——长轮询靠它判断要不要挂起。
           `0` = 从未写过任何叶子。
@@ -250,7 +257,12 @@ paths:
         - `tone` 可选：颜色档位 `red`（缺省）/ `orange` / `green` / `gray`，其余值丢弃；
         - `items` 可选：悬停徽标显示的详情列表（如最新工单主题）。只收字符串元素，
           每条截断到 120 字符、最多保留 20 条；
-        - `ts` 可选：上报时刻（毫秒时间戳）；缺省由宿主补 `Date.now()`。
+        - `ts` 可选：上报时刻（毫秒时间戳）；缺省由宿主补 `Date.now()`；
+        - `source` 可选（ADR-002 数据源注册表）：投喂方自报的来源 id（≤64 字符）。
+          命中用户配置 `sources[]` 里已声明的 id → 刷新该源心跳（新鲜度看门狗据此判活）；
+          缺省 / 未声明 / 非法 → **照常投喂，绝不拒收**（匿名兼容，老调用方零改动）。
+          徽标带 `source` 且该源被判 stale / expired 时，渲染端把徽标降为 `gray` 色
+          （数据不清、只降色，源恢复心跳后自动回色）。
 
         渲染形态：`label + ' ' + count`（无 label 只显数字）；有 `href` 时点击新开标签页、
         有 `items` 时悬停显示详情；仅**网页端**宠物渲染（桌面 Electron 形态暂不显示徽标）。
@@ -275,6 +287,7 @@ paths:
                   label: 待处理
                   href: https://desk.zoho.com/support/technical-support/tickets
                   tone: red
+                  source: zoho-tm
                   items:
                     - 主题一：传感器质保
                     - 主题二：发票补开
@@ -465,6 +478,10 @@ paths:
         - `anim` 可选，是否联动一次 `events.whisper` 动画。缺省 `true`（= 老行为）。
           **只有严格 `false` 才关闭**（`"false"` 字符串之类一律按"要联动"处理）。关闭时渲染端
           **不查动画池、不换源**，因此该宠物配置里没有 `events.whisper` 也不影响"只弹气泡"这条路。
+        - `source` 可选（ADR-002 数据源注册表）：投喂方自报的来源 id（≤64 字符）。
+          命中用户配置 `sources[]` 里已声明的 id → 刷新该源心跳；缺省 / 未声明 / 非法 →
+          **照常投喂，绝不拒收**（匿名兼容）。心跳在**所有校验与门禁之前**记录：脚本
+          能 POST 到桥就证明它活着（被 pet-required / surface / lock 拒收也不算 stale）。
 
         两个新参数**互相独立**，各管一件事：
 
@@ -524,6 +541,15 @@ paths:
                     是否联动一次 `events.whisper` 动画。缺省 `true`（老行为）。
                     **只有严格 `false` 才关闭**——其余值（含 `"false"` 字符串）一律按"要联动"处理。
                   example: false
+                source:
+                  type: string
+                  maxLength: 64
+                  description: |
+                    投喂方自报的来源 id（ADR-002 数据源注册表，可选）。命中用户配置 `sources[]`
+                    里已声明的 id → 刷新该源心跳（新鲜度看门狗）；缺省 / 未声明 / 非法 →
+                    照常投喂（匿名兼容）。广播源多为事件型（无 expectIntervalMs）→ 永不 stale，
+                    心跳只作 lastSeen 展示。
+                  example: seeed-files
             examples:
               textOnly:
                 summary: 只说一句（缺省 10 秒 + 联动动画）
@@ -2585,6 +2611,10 @@ components:
               $ref: "#/components/schemas/ConfigLeaf"
             badge:
               $ref: "#/components/schemas/BadgeLeaf"
+            menu:
+              $ref: "#/components/schemas/MenuLeaf"
+            sources:
+              $ref: "#/components/schemas/SourcesLeaf"
         pets:
           type: object
           description: 每只宠物各自一份；键是宠物 id（**可含点号，勿切分**）
@@ -2948,6 +2978,49 @@ components:
           example:
             - 主题一：传感器质保
             - 主题二：发票补开
+        source:
+          type: string
+          maxLength: 64
+          description: |
+            投喂方自报的来源 id（ADR-002，可选）。渲染端拿它与 `sections.sources` 的健康快照
+            联动：该 id 判 stale / expired 时徽标降 `gray`（数据不清、只降色）。
+          example: zoho-tm
+
+    MenuLeaf:
+      type: object
+      required: [counter, data]
+      description: |
+        第三方菜单项注册表叶子（issue：第三方菜单项）。**唯一写方**：`POST /menu/item`（第三方
+        注册）。`data` = `owner → 菜单文案列表` 的映射（owner = 注册方插件标识，取其菜单时
+        供 `/menu/events` 消费端过滤）；`null` = 初始态（无任何注册）。
+      properties:
+        counter:
+          $ref: "#/components/schemas/Counter"
+        data:
+          description: "`owner → string[]`；`null` = 从未写过（初始态）。"
+          oneOf:
+            - type: object
+              additionalProperties:
+                type: array
+                items:
+                  type: string
+            - type: "null"
+
+    SourcesLeaf:
+      type: object
+      required: [counter, data]
+      description: |
+        数据源健康快照叶子（ADR-002）。**唯一写方**：宿主看门狗（每 30s 一拍）+ 心跳到达即时刷
+        （内容变化才写）。消费端：网页端徽标降色判定（`badge.source` 对照 `list[].health`）。
+        `null` = 初始态（老宿主 / 尚未起看门狗）。
+      properties:
+        counter:
+          $ref: "#/components/schemas/Counter"
+        data:
+          description: "`SourcesSnapshot`；`null` = 从未写过（初始态）。"
+          oneOf:
+            - $ref: "#/components/schemas/SourcesSnapshot"
+            - type: "null"
 
     BadgeRequest:
       type: object
@@ -2985,6 +3058,66 @@ components:
           description: 悬停详情列表。只收字符串元素（其余过滤），每条截断 120 字符、最多保留 20 条。
           example:
             - 主题一：传感器质保
+        source:
+          type: string
+          maxLength: 64
+          description: |
+            投喂方自报的来源 id（ADR-002 数据源注册表，可选）。命中用户配置 `sources[]`
+            里已声明的 id → 刷新该源心跳（新鲜度看门狗）；缺省 / 未声明 / 非法 →
+            照常投喂（匿名兼容）。徽标携带 source 且该源判 stale / expired → 渲染端降 gray。
+          example: zoho-tm
+
+    SourceHealthEntry:
+      type: object
+      required: [id, type, feed, health]
+      description: |
+        `sections.sources.data.list` 的一项：一个数据源的当前健康度（GET /state 轮询）。
+        值由宿主看门狗每 30s 判一次写进叶子；心跳到达时（POST /badge /broadcast 带
+        命中的 source）即时刷新。
+      properties:
+        id:
+          type: string
+          description: 声明的来源 id（用户配置 `sources[]` 里的一项）。
+        type:
+          type: string
+          enum: [external-push]
+          description: v1 只有 external-push（外部推送型）；active 型（宿主内建适配器）阶段三加入。
+        feed:
+          type: string
+          enum: [badge, broadcast]
+          description: 该源声明喂哪个叶子（badge = 周期性徽标；broadcast = 事件流）。
+        health:
+          type: string
+          enum: [alive, stale, unknown, expired, disabled]
+          description: |
+            - `alive`：心跳在阈值内（阈值 = max(2×interval, 5min)）；
+            - `stale`：超过阈值——**只有声明了 expectIntervalMs 的源才会 stale**（事件型永不）；
+            - `unknown`：从未心跳过（信息性）；事件型源见过之后恒为 alive；
+            - `expired`：active 源自报故障（阶段三）；
+            - `disabled`：声明里 `enabled:false`（用户停用）。
+        lastSeen:
+          type: integer
+          format: int64
+          description: 最近一次心跳（epoch ms）；从未心跳则该字段缺省。
+        expectIntervalMs:
+          type: integer
+          description: 声明的期待心跳间隔（透传：消费端可显示「期待 N 秒一拍」）。
+
+    SourcesSnapshot:
+      type: object
+      required: [list]
+      description: |
+        `sections.sources.data` 的形状（GET /state 轮询；ADR-002）。`anonymousLastSeen`
+        是不带 source 的投喂的最近时刻——统计性信息，不参与任何健康判定（匿名兼容铁律）。
+      properties:
+        list:
+          type: array
+          items:
+            $ref: "#/components/schemas/SourceHealthEntry"
+        anonymousLastSeen:
+          type: integer
+          format: int64
+          description: 最近一次匿名投喂（不带 source / source 未声明）的时刻；从未则缺省。
 
     NotifyFrame:
       oneOf:

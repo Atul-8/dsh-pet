@@ -17,8 +17,10 @@ import {
   flattenCounters,
   readAnim,
   readBalance,
+  readBadge,
   readPosition,
   readSay,
+  readSources,
   readThrow,
   takeChanged,
   type PollState,
@@ -395,5 +397,78 @@ describe('readThrow —— 抛掷指令叶子（角度 + 力度）', () => {
     assert.equal(readThrow({ counter: 1, data: { angle: 45, power: 0 } }), null);
     assert.equal(readThrow({ counter: 1, data: { angle: 45, power: -1 } }), null);
     assert.equal(readThrow({ counter: 1, data: { angle: 45, power: NaN } }), null);
+  });
+});
+
+describe('readSources —— 数据源健康快照（ADR-002 消费端收窄）', () => {
+  test('合法快照：list 收窄 + lastSeen / expectIntervalMs / anonymousLastSeen 透传', () => {
+    const snap = readSources({
+      counter: 1,
+      data: {
+        list: [
+          {
+            id: 'zoho-tm',
+            type: 'external-push',
+            feed: 'badge',
+            health: 'stale',
+            lastSeen: 123,
+            expectIntervalMs: 90000,
+          },
+          { id: 'seeed-files', type: 'external-push', feed: 'broadcast', health: 'alive', lastSeen: 456 },
+        ],
+        anonymousLastSeen: 789,
+      },
+    });
+    assert.deepEqual(snap, {
+      list: [
+        {
+          id: 'zoho-tm',
+          type: 'external-push',
+          feed: 'badge',
+          health: 'stale',
+          lastSeen: 123,
+          expectIntervalMs: 90000,
+        },
+        { id: 'seeed-files', type: 'external-push', feed: 'broadcast', health: 'alive', lastSeen: 456 },
+      ],
+      anonymousLastSeen: 789,
+    });
+  });
+
+  test('空表是合法形态（没声明任何源）；anonymousLastSeen 缺省', () => {
+    assert.deepEqual(readSources({ counter: 1, data: { list: [] } }), { list: [] });
+  });
+
+  test('脏数据 → null：null data / 非 list / list 非数组', () => {
+    assert.equal(readSources({ counter: 1, data: null }), null);
+    assert.equal(readSources({ counter: 1, data: 'nope' }), null);
+    assert.equal(readSources({ counter: 1, data: { list: 'nope' } }), null);
+  });
+
+  test('脏条目跳过不丢整份：非对象 / 缺 id / health 白名单外', () => {
+    const snap = readSources({
+      counter: 1,
+      data: {
+        list: [
+          42,
+          { type: 'external-push', feed: 'badge', health: 'alive' },
+          { id: 'ok', type: 'external-push', feed: 'badge', health: 'nonsense' },
+          { id: 'ok2', type: 'external-push', feed: 'badge', health: 'alive', lastSeen: 'soon' },
+        ],
+      },
+    });
+    assert.deepEqual(snap, { list: [{ id: 'ok2', type: 'external-push', feed: 'badge', health: 'alive' }] });
+  });
+});
+
+describe('readBadge —— source 字段收窄（ADR-002）', () => {
+  test('合法 source 透传（徽标降色的判据来源）', () => {
+    const hit = readBadge({ counter: 1, data: { count: 3, source: 'zoho-tm' } });
+    assert.deepEqual(hit, { count: 3, source: 'zoho-tm' });
+  });
+  test('非法 source 丢字段：非字符串 / 空 / >64（匿名兼容，徽标照常渲染）', () => {
+    assert.deepEqual(readBadge({ counter: 1, data: { count: 3, source: 42 } }), { count: 3 });
+    assert.deepEqual(readBadge({ counter: 1, data: { count: 3, source: '   ' } }), { count: 3 });
+    assert.deepEqual(readBadge({ counter: 1, data: { count: 3, source: 'x'.repeat(65) } }), { count: 3 });
   });
 });

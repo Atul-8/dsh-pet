@@ -52,6 +52,12 @@ export default defineConfig([
   {
     ...shared,
     // 宿主半侧保持 ESM（由 DSH 的 Loader import），绝不能包 IIFE。
+    // target es2022（同 standalone 入口的理由）：es2020 会把 class field（含 `private readonly`）
+    // 降级成 `_defineProperty(...)` → 拖进一条 `@oxc-project/runtime` 裸 import —— 那是
+    // rolldown 的 optional peer，不在本包 dependencies 里，profile 侧解析不到 → 插件加载
+    // 直接 ERR_MODULE_NOT_FOUND（实测：加了 class field 的 SourceRegistry 就踩中）。
+    // DSH 宿主是 Node ≥ 22 的 Electron 主进程，es2022 原生支持，零风险。
+    target: 'es2022',
     entry: {
       index: 'src/host/index.ts',
     },

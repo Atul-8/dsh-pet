@@ -29,6 +29,7 @@ import {
   readLock,
   readWorkStatus,
   readBadge,
+  readSources,
   takeChanged,
   type PollState,
   type PositionMode,
@@ -36,6 +37,7 @@ import {
   type LockState,
   type PetFacing,
   type BadgeState,
+  type SourcesSnapshot,
 } from '../shared/state';
 import { WORK_STATUS_INDEX, type WorkStatusSnapshot } from '../shared/work-status';
 import { makeBalanceBubble, makeWhisperBubble } from './bubble';
@@ -257,6 +259,7 @@ export function makePetUI(rt: {
     menuItemsRef,
     arena,
     badge,
+    sources,
   }: {
     cfg: RuntimePet;
     balance: BalanceState | null;
@@ -296,6 +299,10 @@ export function makePetUI(rt: {
     lockTick: number;
     /** 常驻计数徽标状态（通用）：容器从 S 的 sections.badge 分发下来，count>0 时渲染常驻徽标 */
     badge: BadgeState | null;
+    /** 数据源健康快照（ADR-002）：容器从 S 的 sections.sources 分发下来。徽标降色的唯一
+     *  判据来源——badge.source 在此快照里判 stale/expired 时，徽标 tone 降为 gray（数据不清、
+     *  只降色，链路恢复下一拍自动回原色）；匿名徽标（无 source）永不降色。 */
+    sources: SourcesSnapshot | null;
     /** 第三方菜单项（/state 的 sections.menu 快照）。传 ref 而不是值：**只在右键那一刻**读，
      *  注册表变化不需要重渲染任何宠物（菜单本来就是打开时现拼的）。 */
     menuItemsRef: ReactNS.MutableRefObject<MenuMoreItem[]>;
@@ -2362,6 +2369,20 @@ export function makePetUI(rt: {
       // 原先这里挂 title（原生系统提示）：已换成自绘浮层，但无障碍名称不能跟着丢
       'aria-label': cfg.name,
     };
+    // 徽标降色视图（ADR-002）：徽标自带 source 且该源在健康快照里判 stale/expired → gray +
+    // tooltip 追加「数据源离线 N 分钟」说明行（items 有值 → hover 可见）。数据不清、只降色：
+    // 源恢复心跳 → 健康回 alive → 下一拍（sources 叶子变化触发重渲染）自动回原色。
+    // 匿名徽标（无 source / 源未声明）永不降色——匿名调用方不参与健康判定（契约铁律）。
+    const badgeView = (() => {
+      if (!badge?.source || !sources) return badge;
+      const entry = sources.list.find((s) => s.id === badge.source);
+      if (!entry || (entry.health !== 'stale' && entry.health !== 'expired')) return badge;
+      const mins =
+        entry.lastSeen === undefined
+          ? '从未心跳'
+          : Math.max(1, Math.round((Date.now() - entry.lastSeen) / 60_000)) + ' 分钟';
+      return { ...badge, tone: 'gray' as const, items: [...(badge.items ?? []), `数据源离线 ${mins}`] };
+    })();
     return h('div', {
       ref: rootRef,
       className: 'dsh-pet-root',
@@ -2385,8 +2406,8 @@ export function makePetUI(rt: {
         // 碎碎念/对话气泡**不受 whisperEnabled 限制**（该字段只关自动周期轮询的触发，见上头
         // useEffect 的门控）；whisperText 只由 triggerWhisper 设置，所以说话气泡照常渲染。
         bubbleNode,
-        // 常驻计数徽标：独立于气泡单槽（不参与优先级），count>0 时始终可见
-        h(Badge, { state: badge }),
+        // 常驻计数徽标：独立于气泡单槽（不参与优先级），count>0 时始终可见（badgeView 见上）
+        h(Badge, { state: badgeView }),
         h('div', {
           ref: stageRef,
           className: 'dsh-pet-stage',
@@ -2428,6 +2449,9 @@ export function makePetUI(rt: {
     const [balanceManual, setBalanceManual] = useState(false);
     // 常驻计数徽标（通用）：容器统一轮询 /state 的 sections.badge，count>0 时各宠物渲染常驻徽标
     const [badge, setBadge] = useState<BadgeState | null>(null);
+    // 数据源健康快照（ADR-002）：容器统一轮询 /state 的 sections.sources，作为徽标降色的
+    // 唯一判据来源分发到各宠物（badge.source 判 stale/expired → gray；匿名永不降色）。
+    const [sources, setSources] = useState<SourcesSnapshot | null>(null);
     // 上次已提示的不可用原因（reason:provider）：自动轮询只在原因变化时再弹（判定在 src/shared，两端同一份）
     const noticeKeyRef = useRef<string | null>(null);
     // 余额结果 → 状态与气泡（周期刷新与手动触发**共用这一条路径**，避免各写一份后漂移）。
@@ -2564,6 +2588,9 @@ export function makePetUI(rt: {
           // 菜单项是**当前状态**不是"事件"，首拉必须装上：否则刷新页面后第三方菜单会一直是空的，
           // 要等下一次注册（写 sections.menu）才出现。
           menuItemsRef.current = readMenuItems(s.sections.menu?.data);
+          // 数据源健康快照同理（当前状态）：首拉装上——徽标先到、快照后到时（看门狗 30s 一拍），
+          // 降色判定才有据可依；不装的话刷新页面后最长 30s 内徽标降不了色。
+          setSources(readSources(s.sections.sources ?? { data: null, counter: 0 }));
           return;
         }
         for (const { path, leaf } of takeChanged(s, baseline)) {
@@ -2589,6 +2616,11 @@ export function makePetUI(rt: {
           } else if (path === 'sections.badge') {
             const hit = readBadge(leaf);
             if (hit) setBadge(hit);
+          } else if (path === 'sections.sources') {
+            // 数据源健康快照（ADR-002）：setSources 触发重渲染 → PetCard 的徽标降色视图重算。
+            // 形状非法（老宿主写坏）→ readSources null → 跳过这一拍，保留上一份快照。
+            const snap = readSources(leaf);
+            if (snap) setSources(snap);
           } else if (path === 'sections.menu') {
             // 第三方菜单注册表快照：只更新 ref（菜单在右键那一刻现拼），不触发任何渲染
             menuItemsRef.current = readMenuItems(leaf.data);
@@ -2698,6 +2730,7 @@ export function makePetUI(rt: {
             lock: lockRef.current[p.id],
             lockTick,
             badge,
+            sources,
             arena: arenaRef,
           }),
         )

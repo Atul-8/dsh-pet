@@ -45,8 +45,10 @@ export interface StateLeaf {
  *  当前只有 `POST /pet-display` 写它：那是唯一一个**不是发起页面自己**的配置改动
  *  （桌面端右键改显示位置），浏览器端只能靠这个信号知道。
  *  保存 / 同步配置（PUT / POST /config）**不写**——它们的调用方自己就拿到了成品聚合。
- *  `menu` 是第三方菜单项的注册表叶子（owner → labels，见 host 的 /menu/item 三门）。 */
-export type SectionName = 'balance' | 'workStatus' | 'notify' | 'config' | 'badge' | 'menu';
+ *  `menu` 是第三方菜单项的注册表叶子（owner → labels，见 host 的 /menu/item 三门）。
+ *  `sources` 是数据源健康快照叶子（ADR-002：心跳注册表 → 看门狗 30s 一拍写入；心跳到达时
+ *  即时刷一次，徽标降色不等下一拍）。 */
+export type SectionName = 'balance' | 'workStatus' | 'notify' | 'config' | 'badge' | 'menu' | 'sources';
 
 /** 每宠物段（say = 要说的话；anim = 要播的动画名；position = 要挪到的位置；throw = 要给的初速度；
  *  lock = 占用锁状态）。
@@ -139,6 +141,7 @@ export class PollStateStore {
       config: emptyLeaf(),
       badge: emptyLeaf(),
       menu: emptyLeaf(),
+      sources: emptyLeaf(),
     };
     this.pets = new Map();
     this.waiters = new Set();

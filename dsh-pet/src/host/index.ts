@@ -112,6 +112,7 @@ import { automaticWhisperSchedule } from './whisper-policy';
 import { generateChat, type ChatMemoryMessage } from './chat';
 import { configuredModel } from './model-selection';
 import { limitPool, pickMeme, readMemePool } from './memes';
+import { normalizeSourceField, readSourceDecls, SourceRegistry } from './sources';
 import {
   decideBroadcast,
   decideBubbleClear,
@@ -363,6 +364,25 @@ export function apply(ctx: any): void {
   // 与 S 的关系：注册表本身写进 S 的 sections.menu（两端据此拼「更多」）；点击事件**不进 S**——
   // 它是触发不是状态，走 /menu/events 的读取即消费，只给注册它的那个 owner 看。见 ./menu 的说明。
   const menuRegistry = new MenuRegistry();
+  // 数据源心跳注册表（ADR-002 阶段一）：外部脚本 POST /badge /broadcast 带的 source 字段
+  // 在这里刷新心跳；看门狗（下方 sources poll effect）每 30s 判一次健康写进 sections.sources。
+  // **进程内存态**：重启即空——声明表在用户配置里（读时恢复），心跳本来就是「最近有没有来过」。
+  const sourceRegistry = new SourceRegistry();
+  /** 上次写进 sections.sources 的 JSON（变更检测：内容没变不写——每次写都会推 counter、
+   *  前端会重渲染，30s 一拍的「心跳时刻更新」没有消费价值，健康度变化才有）。 */
+  let lastSourcesJson: string | null = null;
+  /** 声明表 + 心跳 → 快照 → 写 sections.sources（内容变化才写）。 */
+  const refreshSourcesLeaf = (): void => {
+    try {
+      const snapshot = sourceRegistry.snapshot(readSourceDecls(configPaths), Date.now());
+      const json = JSON.stringify(snapshot);
+      if (json === lastSourcesJson) return;
+      lastSourcesJson = json;
+      state.writeSection('sources', snapshot);
+    } catch {
+      // 用户层读不动等：sources 是观测增强，任何失败都静默跳过这一拍（绝不影响投喂链路）
+    }
+  };
   // 对外 Cordis 服务（宿主半侧）：与页面侧的 petApi7340 同名，但分属两个容器，互不可见也互不覆盖。
   // 只暴露 register（返回注销函数，配合 ctx.effect 在卸载时自动清理）与 list（排障用）；
   // 不暴露 unregister：注销走返回值，避免任何插件都能注销别人的 provider。
@@ -1829,12 +1849,19 @@ export function apply(ctx: any): void {
             .slice(0, 20)
         : undefined;
       const ts = typeof o.ts === 'number' && Number.isFinite(o.ts) ? o.ts : Date.now();
+      // source（ADR-002，可选）：投喂方自报来源 id。命中声明表 → 刷新心跳；未声明/非法 →
+      // 静默丢字段照常投喂（匿名兼容，绝不拒收）。心跳在**任何校验之前**记：POST 到达即证明
+      // 脚本活着（body 坏被 400 拒也是「活着但发坏数据」，不该表达成 stale）。
+      const source = normalizeSourceField(o.source);
+      sourceRegistry.noteHeartbeat(source, Date.now(), readSourceDecls(configPaths));
+      refreshSourcesLeaf();
       state.writeSection('badge', {
         count,
         ...(label ? { label } : {}),
         ...(href ? { href } : {}),
         ...(tone ? { tone } : {}),
         ...(items && items.length ? { items } : {}),
+        ...(source ? { source } : {}),
         ts,
       });
       return { kind: 'json', status: 200, obj: { ok: true } };
@@ -1959,6 +1986,12 @@ export function apply(ctx: any): void {
         return { kind: 'json', status: 400, obj: { error: 'invalid JSON body' } };
       }
       const o = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
+      // source（ADR-002，可选）：与 /badge 同一口径——命中声明表刷心跳，未声明/非法静默丢。
+      // 心跳在所有校验之前记（含 pet-required / surface / lock 各门禁的拒绝路径）：
+      // 脚本能 POST 到桥就证明它活着，被门禁拒绝不代表它死了。
+      const broadcastSource = normalizeSourceField(o.source);
+      sourceRegistry.noteHeartbeat(broadcastSource, Date.now(), readSourceDecls(configPaths));
+      refreshSourcesLeaf();
       // 空文本不需要读配置就能判定：先短路，别为一个必然失败的请求去碰磁盘
       if (!normalizeBroadcastText(o.text)) {
         return { kind: 'json', status: 200, obj: { ok: false, reason: 'bad-request', message: 'text 为空' } };
@@ -2824,6 +2857,32 @@ export function apply(ctx: any): void {
       if (timer !== null) clearTimeout(timer);
     };
   }, 'dsh-pet: balance poll');
+
+  // 数据源看门狗（ADR-002 阶段一）：每 30s 一拍，把心跳注册表判成健康快照写进
+  // sections.sources（内容变化才写——健康度翻转 / lastSeen 刷新才算变化，见 refreshSourcesLeaf）。
+  // 周期拍的意义：心跳只能证明「来过」，stale 是**时间推移**造成的——没有定时器就永远不会
+  // 从 alive 翻成 stale（源半夜死了徽标要等到天亮它再 POST 才知道）。声明表每拍重读：
+  // 用户改了 sources 配置下一拍自然跟上（与余额周期同一套口径）。
+  ctx.effect(() => {
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const SOURCES_TICK_MS = 30_000;
+    function arm(): void {
+      if (disposed) return;
+      timer = setTimeout(tick, SOURCES_TICK_MS);
+    }
+    function tick(): void {
+      if (disposed) return;
+      refreshSourcesLeaf();
+      arm();
+    }
+    refreshSourcesLeaf(); // 启动即写一次（声明了源但还没心跳 → unknown 立刻可见）
+    arm();
+    return () => {
+      disposed = true;
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, 'dsh-pet: sources watchdog');
 
   // 碎碎念周期：host 侧调度（前端不再有任何碎碎念定时器）。
   // 一拍 = 读一次配置 + 给"到点"的宠物各生成一句；下一拍按**最短周期**排（多数部署只有一个
