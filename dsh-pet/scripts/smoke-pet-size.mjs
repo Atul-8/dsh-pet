@@ -44,6 +44,9 @@ apply({
     }
   },
   on: () => noop,
+  // 上游宿主半侧会 ctx.provide('petApi7340', …) 导出余额 provider 注册服务；
+  // 冒烟环境没有 Cordis 运行时，吞掉即可（路由行为不受影响）。
+  provide: noop,
   webServer: { register: (spec) => ((handler = spec.handler), noop) },
   commands: { register: () => noop },
   logger: { warn: noop, info: noop, debug: noop, error: noop },

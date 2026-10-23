@@ -296,6 +296,9 @@ export function makePetUI(rt: {
     lockTick: number;
     /** 常驻计数徽标状态（通用）：容器从 S 的 sections.badge 分发下来，count>0 时渲染常驻徽标 */
     badge: BadgeState | null;
+    /** 第三方菜单项（/state 的 sections.menu 快照）。传 ref 而不是值：**只在右键那一刻**读，
+     *  注册表变化不需要重渲染任何宠物（菜单本来就是打开时现拼的）。 */
+    menuItemsRef: ReactNS.MutableRefObject<MenuMoreItem[]>;
     arena: ReactNS.MutableRefObject<{ slots: Record<string, PetCollisionSlot> }>;
   }) {
     // ---- 尺寸（由配置传入；容器/设置页更新后即时跟随）----
@@ -2323,7 +2326,13 @@ export function makePetUI(rt: {
         });
       }
       if (bubbleOn && balance && (cfg.balanceEnabled || balanceManual)) {
-        return h(BalanceBubble, { state: balance, on: bubbleOn, below: bubbleBelow });
+        return h(BalanceBubble, {
+          state: balance,
+          on: bubbleOn,
+          below: bubbleBelow,
+          expanded: balanceExpanded,
+          onToggle: toggleBalanceDetail,
+        });
       }
       if (workBubbleOn && workText && cfg.workStatusEnabled) {
         return h(WhisperBubble, { text: workText, on: workBubbleOn, below: bubbleBelow });
@@ -2580,6 +2589,9 @@ export function makePetUI(rt: {
           } else if (path === 'sections.badge') {
             const hit = readBadge(leaf);
             if (hit) setBadge(hit);
+          } else if (path === 'sections.menu') {
+            // 第三方菜单注册表快照：只更新 ref（菜单在右键那一刻现拼），不触发任何渲染
+            menuItemsRef.current = readMenuItems(leaf.data);
           } else if (path.startsWith('pets.') && path.endsWith('.say')) {
             // 说话叶子：路径形如 pets.<id>.say。宠物 id **允许含点号**，所以按前缀/后缀切片，
             // 绝不 split('.')（那会把 id 切碎、派发给不存在的宠物）。

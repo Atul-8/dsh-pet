@@ -175,17 +175,71 @@ const BALANCE_FADE_MS = 250;
  */
 export function makeBalanceBubble(rt: {
   h: typeof jsx;
-}): (props: { state: BalanceState; on: boolean; below?: boolean }) => ReactNode {
-  const { h } = rt;
+  useState: <T>(init: T) => [T, Dispatch<SetStateAction<T>>];
+  // 用 React 命名空间类型而非 typeof（同 pet.ts：type-only import 的 hook 无法进入声明导出）
+  useEffect: (effect: ReactNS.EffectCallback, deps?: ReactNS.DependencyList) => void;
+}): (props: {
+  state: BalanceState;
+  on: boolean;
+  /** 目标形态（点一下切换） */
+  expanded: boolean;
+  /** 点击气泡：上层据此切换 expanded 并重置 10s 计时器 */
+  onToggle: () => void;
+  /** 徽标在场时气泡改到宠物脚下（pet.ts 传入；与 WhisperBubble 的同名字段同一语义） */
+  below?: boolean;
+}) => ReactNode {
+  const { h, useState, useEffect } = rt;
   injectBubbleCss();
 
-  return function BalanceBubble({ state, on, below }: { state: BalanceState; on: boolean; below?: boolean }) {
-    const rows = balanceBubbleView(state);
+  return function BalanceBubble({
+    state,
+    on,
+    expanded,
+    onToggle,
+    below,
+  }: {
+    state: BalanceState;
+    on: boolean;
+    expanded: boolean;
+    onToggle: () => void;
+    below?: boolean;
+  }) {
+    // 目标是 expanded，实际显示的是 full —— 两者分开是为了留出「先淡出、再换内容」的那 250ms。
+    const [full, setFull] = useState(false);
+    const [fading, setFading] = useState(false);
+    useEffect(() => {
+      if (expanded === full) return;
+      setFading(true);
+      const timer = window.setTimeout(() => {
+        setFull(expanded);
+        setFading(false);
+      }, BALANCE_FADE_MS);
+      return () => window.clearTimeout(timer);
+    }, [expanded, full]);
+
+    const rows = full ? balanceDetailView(state) : balanceBubbleView(state);
+    // 只有 windows 形态有三窗口读数可展开；money（账户余额）/ points（积分）与不可用状态
+    // 点开也没别的内容
+    const clickable = state.ok && state.shape === 'windows';
     // 不可用状态（不支持/缺凭证/抓取失败）是**多行文字说明**：套用碎碎念的换行变体
     // （字号缩到 0.75、宽度下限更窄，多行说明更紧凑；折行现在已是气泡的通用行为）
     const wrap = state.ok ? '' : ' dsh-pet-whisper';
     return h('div', {
-      className: 'dsh-pet-bubble' + wrap + (below ? ' is-under' : '') + (on ? ' is-on' : ''),
+      className:
+        'dsh-pet-bubble' +
+        wrap +
+        (below ? ' is-under' : '') +
+        (on ? ' is-on' : '') +
+        (clickable ? ' is-clickable' : '') +
+        (full ? ' is-expanded' : '') +
+        (fading ? ' is-fading' : ''),
+      // 就地吞掉：宠物本体（.dsh-pet-hit）的点击/拖拽不能被这次点击碰到
+      onClick: clickable
+        ? (e: ReactNS.MouseEvent<HTMLDivElement>) => {
+            e.stopPropagation();
+            onToggle();
+          }
+        : undefined,
       children: rowsToNodes(h, rows),
     });
   };

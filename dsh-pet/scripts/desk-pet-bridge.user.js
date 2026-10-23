@@ -28,7 +28,8 @@
   const LEGACY_PORTS = [62056, 57925, 59772];
   // 兜底默认 API（学习成功前使用；学习后完全被页面真实请求取代）
   const DEFAULT_API = {
-    url: '/supportapi/zd/seeed/api/v1/tickets?include=contacts,products,assignee,team,isRead&departmentId=630254000037747420&viewId=630254000129591195&limit=50&sortBy=-recentThread&filters=' +
+    url:
+      '/supportapi/zd/seeed/api/v1/tickets?include=contacts,products,assignee,team,isRead&departmentId=630254000037747420&viewId=630254000129591195&limit=50&sortBy=-recentThread&filters=' +
       encodeURIComponent(JSON.stringify({ criteria: { fieldConditions: [] } })),
     headers: {},
   };
@@ -77,9 +78,21 @@
   /** 浏览器禁止脚本设置的请求头一律剔除（Cookie/Host/Origin/Referer 等由浏览器自己带） */
   function safeHeaders(headers) {
     const forbidden = new Set([
-      'cookie', 'host', 'origin', 'referer', 'user-agent', 'content-length',
-      'connection', 'accept-encoding', 'keep-alive', 'upgrade', 'te', 'trailer',
-      'transfer-encoding', 'proxy-authorization', 'proxy-connection',
+      'cookie',
+      'host',
+      'origin',
+      'referer',
+      'user-agent',
+      'content-length',
+      'connection',
+      'accept-encoding',
+      'keep-alive',
+      'upgrade',
+      'te',
+      'trailer',
+      'transfer-encoding',
+      'proxy-authorization',
+      'proxy-connection',
     ]);
     const out = {};
     for (const [k, v] of Object.entries(headers || {})) {
@@ -248,7 +261,8 @@
       const zero = await fetchPage(api, 0);
       if (zero.ok && Array.isArray(zero.json?.data) && zero.json.data.length > 0) first = zero;
     }
-    if (!first.ok) return { error: 'HTTP ' + first.status + '（登录态失效？接口变了？）', detail: first.text.slice(0, 200) };
+    if (!first.ok)
+      return { error: 'HTTP ' + first.status + '（登录态失效？接口变了？）', detail: first.text.slice(0, 200) };
     if (!Array.isArray(first.json?.data)) return { error: 'HTTP 200 但响应形状异常', detail: first.text.slice(0, 200) };
     const all = [];
     const seen = new Set();
@@ -356,7 +370,9 @@
     // 5a) 若尚未学习 API 且捕获到候选 → 逐个验证，通过即采用
     if (!learned && candidates.length > 0) {
       // 优先带 viewId 的候选（视图级请求，正是我们想盯的）
-      const ordered = [...candidates].sort((a, b) => (b.url.includes('viewId=') ? 1 : 0) - (a.url.includes('viewId=') ? 1 : 0));
+      const ordered = [...candidates].sort(
+        (a, b) => (b.url.includes('viewId=') ? 1 : 0) - (a.url.includes('viewId=') ? 1 : 0),
+      );
       for (const c of ordered) {
         const v = await validateCandidate(c);
         if (v.ok) {
@@ -439,7 +455,12 @@
     tick();
   });
   GM_registerMenuCommand('dsh-pet: 查看诊断', () => {
-    alert(lastLines.join('\n') + '\n\nAPI: ' + ((learned && learned.url) || '默认(未学习)') + '\n（详细日志在控制台，过滤 [dsh-pet-desk]）');
+    alert(
+      lastLines.join('\n') +
+        '\n\nAPI: ' +
+        ((learned && learned.url) || '默认(未学习)') +
+        '\n（详细日志在控制台，过滤 [dsh-pet-desk]）',
+    );
   });
 
   // 启动：稍等页面安顿，再开始轮询（页面自身的工单请求会被挂钩捕获用于学习）

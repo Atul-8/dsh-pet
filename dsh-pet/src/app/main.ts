@@ -284,7 +284,9 @@ function landingPage(port: number): string {
   const info = status(port);
   const pets = (info.pets as Array<Record<string, unknown>>) ?? [];
   const petLines = pets.length
-    ? pets.map((pet) => `<li>${escapeHtml(String(pet.name ?? pet.id))}（${escapeHtml(String(pet.display))}）</li>`).join('')
+    ? pets
+        .map((pet) => `<li>${escapeHtml(String(pet.name ?? pet.id))}（${escapeHtml(String(pet.display))}）</li>`)
+        .join('')
     : '<li>（未读到宠物，检查配置文件）</li>';
   return `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><title>dsh-pet</title>

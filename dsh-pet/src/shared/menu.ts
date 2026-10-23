@@ -37,8 +37,11 @@ export interface MenuLeaf {
    * set-size=打开「调整大小」滑杆浮层（**当前仅浏览器端注入**——桌面端窗口尺寸随 Helper
    * 重启重建，右键就地改大小需要 sprite.js 端配套接入，浏览器先行；桌面端点不到这一项，
    * 走设置页「桌宠配置」或 /pet-size 接口同样生效）。
-   * 手动触发均不受 whisperEnabled 影响（该字段只关自动周期轮询） */
-  action?: 'open-site' | 'show-balance' | 'whisper' | 'chat' | 'home' | 'reload' | 'set-display' | 'set-size';
+   * 手动触发均不受 whisperEnabled 影响（该字段只关自动周期轮询）
+   * third-party=第三方注册的菜单项（见 buildMoreBranch）——点击只把 (owner, label) 上报给宿主，
+   * 不在前端执行任何动作。 */
+  action?:
+    'open-site' | 'show-balance' | 'whisper' | 'chat' | 'home' | 'reload' | 'set-display' | 'set-size' | 'third-party';
   /** set-display 的目标显示位置（与设置页「显示位置」下拉框同一套取值） */
   display?: PetDisplay;
   /** third-party：注册它的 owner（身份键，**只用于回传，不显示**）。同一个 owner 的项收在同一个

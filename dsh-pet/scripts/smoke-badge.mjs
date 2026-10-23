@@ -84,11 +84,17 @@ check('POST /badge 返回 {ok:true}', r.status === 200 && JSON.parse(r.body).ok 
 r = await call('/dsh-pet-7340/state');
 const leaf = JSON.parse(r.body).sections.badge;
 check('sections.badge 存在且 counter>0', leaf && typeof leaf.counter === 'number' && leaf.counter > 0);
-check('badge.data = {count:4,label:"待处理",ts:…}', leaf.data && leaf.data.count === 4 && leaf.data.label === '待处理' && leaf.data.ts === 1710000000000);
+check(
+  'badge.data = {count:4,label:"待处理",ts:…}',
+  leaf.data && leaf.data.count === 4 && leaf.data.label === '待处理' && leaf.data.ts === 1710000000000,
+);
 
 // 3) 客户端收窄
 const narrowed = readBadge(leaf);
-check('readBadge 收窄为 {count:4,label:"待处理",ts:…}', narrowed && narrowed.count === 4 && narrowed.label === '待处理' && narrowed.ts === 1710000000000);
+check(
+  'readBadge 收窄为 {count:4,label:"待处理",ts:…}',
+  narrowed && narrowed.count === 4 && narrowed.label === '待处理' && narrowed.ts === 1710000000000,
+);
 
 // 4) count=0 → 数据合法但徽标隐藏（组件据 count<=0 不渲染）
 r = await call('/dsh-pet-7340/badge', 'POST', JSON.stringify({ count: 0 }));
@@ -130,7 +136,9 @@ r = await call('/dsh-pet-7340/state');
 const rich = readBadge(JSON.parse(r.body).sections.badge);
 check(
   'href/tone/items 正常写入',
-  rich.href === 'https://desk.zoho.com/support/technical-support/tickets' && rich.tone === 'orange' && rich.items?.length === 2,
+  rich.href === 'https://desk.zoho.com/support/technical-support/tickets' &&
+    rich.tone === 'orange' &&
+    rich.items?.length === 2,
 );
 
 r = await call(
