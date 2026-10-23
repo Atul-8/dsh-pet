@@ -5,11 +5,11 @@
 
 三个公开投喂门（本机直连即可，无需 token）：
 
-| 端点 | 语义 | 请求体 |
-| --- | --- | --- |
-| `POST /badge` | 常驻徽标数字 | `{ count, label?, href?, tone?, items?, source? }` |
-| `POST /broadcast` | 事件气泡（宠物说一句） | `{ text, pet, surface?, duration?, anim?, source? }` |
-| `POST /work-status` | 工作状态档位 | `{ state, task? }` |
+| 端点                | 语义                   | 请求体                                               |
+| ------------------- | ---------------------- | ---------------------------------------------------- |
+| `POST /badge`       | 常驻徽标数字           | `{ count, label?, href?, tone?, items?, source? }`   |
+| `POST /broadcast`   | 事件气泡（宠物说一句） | `{ text, pet, surface?, duration?, anim?, source? }` |
+| `POST /work-status` | 工作状态档位           | `{ state, task? }`                                   |
 
 **source 字段**（可选）：声明投喂方身份。需在用户配置 `sources[]` 里声明同名条目
 （见下），之后断链时徽标自动灰化、设置页「数据源」卡显示「已断链」。
@@ -24,9 +24,9 @@
   "sources": [
     { "type": "external-push", "id": "claude-code", "feed": "broadcast" },
     { "type": "external-push", "id": "codex-cli", "feed": "broadcast" },
-    { "type": "external-push", "id": "zoho-tm", "feed": "badge", "expectIntervalMs": 90000 }
+    { "type": "external-push", "id": "zoho-tm", "feed": "badge", "expectIntervalMs": 90000 },
   ],
-  "pets": [ /* ... */ ]
+  "pets": [/* ... */],
 }
 ```
 
@@ -44,17 +44,14 @@
 ```json
 {
   "hooks": {
-    "Stop": [
-      { "hooks": [{ "type": "command", "command": "node ~/.dsh/pet-hooks/claude-code-hooks.mjs" }] }
-    ],
-    "Notification": [
-      { "hooks": [{ "type": "command", "command": "node ~/.dsh/pet-hooks/claude-code-hooks.mjs" }] }
-    ]
+    "Stop": [{ "hooks": [{ "type": "command", "command": "node ~/.dsh/pet-hooks/claude-code-hooks.mjs" }] }],
+    "Notification": [{ "hooks": [{ "type": "command", "command": "node ~/.dsh/pet-hooks/claude-code-hooks.mjs" }] }]
   }
 }
 ```
 
 效果：
+
 - **Stop**（回合结束）→ 宠物气泡「claude 完成一回合」+ 工作状态回空闲
 - **Notification**（等权限 / 等输入）→ 宠物气泡播通知内容 + 工作状态 `waiting`
 - 声明了 `claude-code` 源 → 设置页数据源卡可见其心跳

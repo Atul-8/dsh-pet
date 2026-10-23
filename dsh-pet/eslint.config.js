@@ -35,4 +35,16 @@ export default tseslint.config(
       'no-undef': 'off',
     },
   },
+  {
+    // 适配器样例（adapters/*.mjs）：跑在用户机器的 Node ≥ 22 里（process/fetch/
+    // setTimeout/AbortSignal 全是 Node 全局），且是**交付给用户直接粘贴使用**的
+    // 独立脚本——不进构建图、不受 tsc 检查，关 no-undef 走 Node 全局。
+    files: ['adapters/**/*.mjs'],
+    languageOptions: {
+      globals: { process: 'readonly', fetch: 'readonly', setTimeout: 'readonly', AbortSignal: 'readonly' },
+    },
+    rules: {
+      'no-undef': 'off',
+    },
+  },
 );

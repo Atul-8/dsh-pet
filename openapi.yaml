@@ -482,6 +482,11 @@ paths:
           命中用户配置 `sources[]` 里已声明的 id → 刷新该源心跳；缺省 / 未声明 / 非法 →
           **照常投喂，绝不拒收**（匿名兼容）。心跳在**所有校验与门禁之前**记录：脚本
           能 POST 到桥就证明它活着（被 pet-required / surface / lock 拒收也不算 stale）。
+        - `intent` 可选（ADR-001 事件意图）：`{ type: open-session, sessionId }` 或
+          `{ type: open-url, url }`——告诉消费端「点击之后去哪」。随 `pets.<id>.say`
+          叶子透传；形状非法**静默丢弃 intent、事件照投**（与 /badge 富字段同一约定）。
+          消费者：toast 档位（点击深链）与第三方 presenter；**pet 档位 v1 不消费**
+          （气泡保持非交互）。
 
         两个新参数**互相独立**，各管一件事：
 
@@ -550,6 +555,8 @@ paths:
                     照常投喂（匿名兼容）。广播源多为事件型（无 expectIntervalMs）→ 永不 stale，
                     心跳只作 lastSeen 展示。
                   example: seeed-files
+                intent:
+                  $ref: "#/components/schemas/EventIntent"
             examples:
               textOnly:
                 summary: 只说一句（缺省 10 秒 + 联动动画）
@@ -565,6 +572,14 @@ paths:
                 value:
                   text: 巡检完毕，一切正常
                   url: https://cdn.example.com/拒绝换壁纸.png
+              withIntent:
+                summary: 带点击意图（toast 档位点击可深链；pet 档位 v1 忽略）
+                value:
+                  text: 新客诉 #101 需要处理
+                  source: seeed-files
+                  intent:
+                    type: open-url
+                    url: https://desk.zoho.com/support/technical-support/tickets
               noAnimShort:
                 summary: 只弹 3 秒气泡，不播说话动画
                 value:
@@ -3022,6 +3037,29 @@ components:
             - $ref: "#/components/schemas/SourcesSnapshot"
             - type: "null"
 
+    EventIntent:
+      type: object
+      required: [type]
+      description: |
+        事件点击意图（ADR-001 §4.3，`POST /broadcast` 的可选 `intent` 字段）。
+        形状非法（缺必填 / type 外枚举 / 非对象）→ **静默丢弃 intent，事件照投**
+        （与 /badge 富字段同一约定）。随 `pets.<id>.say` 叶子透传，消费端是 toast 档位
+        与第三方 presenter（pet 档位 v1 不消费——气泡保持非交互）。
+      properties:
+        type:
+          type: string
+          enum: [open-session, open-url]
+          description: |
+            - `open-session`：点击唤起**已存在**的 DSH 会话（N4：不做新建）；
+            - `open-url`：点击新开标签页（scheme 卡在 http/https，与 badge.href 同口径）。
+        sessionId:
+          type: string
+          description: open-session 必填（非空字符串；DSH 会话 id 语法不属于本包契约）。
+        url:
+          type: string
+          format: uri
+          description: open-url 必填（http/https 完整地址）。
+
     BadgeRequest:
       type: object
       required: [count]
@@ -3442,6 +3480,8 @@ components:
             显式 `false` = 只弹气泡，不查动画池、不换源。
             同样只有 `POST /broadcast` 会写；碎碎念与对话回复不写。
           example: true
+        intent:
+          $ref: "#/components/schemas/EventIntent"
 
     SayClear:
       type: object

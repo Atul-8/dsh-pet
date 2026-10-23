@@ -19,6 +19,7 @@ import {
   decideBubbleClear,
   normalizeBroadcastAnim,
   normalizeBroadcastDuration,
+  normalizeBroadcastIntent,
   normalizeBroadcastText,
 } from './broadcast.ts';
 
@@ -81,6 +82,42 @@ describe('normalizeBroadcastText —— 文本规范化（路由与决策层共�
     assert.equal(normalizeBroadcastText('   '), '');
     assert.equal(normalizeBroadcastText('\n\t '), '');
     assert.equal(normalizeBroadcastText('  说话  '), '说话');
+  });
+});
+
+describe('normalizeBroadcastIntent —— 事件意图收窄（ADR-001，非法静默丢事件照投）', () => {
+  test('open-session：sessionId 非空字符串 → 原样通过（trim 判定，不 trim 值）', () => {
+    assert.deepEqual(normalizeBroadcastIntent({ type: 'open-session', sessionId: 'abc-123' }), {
+      type: 'open-session',
+      sessionId: 'abc-123',
+    });
+  });
+
+  test('open-url：http/https 完整地址 → 原样通过', () => {
+    for (const url of ['https://desk.zoho.com/tickets', 'http://127.0.0.1:7340/x']) {
+      assert.deepEqual(normalizeBroadcastIntent({ type: 'open-url', url }), { type: 'open-url', url });
+    }
+  });
+
+  test('非法一律 undefined（事件照投，绝不拒收）：非对象 / type 外枚举 / 缺必填 / 坏 scheme', () => {
+    const bad = [
+      undefined,
+      null,
+      'nope',
+      42,
+      {},
+      { type: 'nonsense' },
+      { type: 'open-session' }, // 缺 sessionId
+      { type: 'open-session', sessionId: '   ' }, // 纯空白
+      { type: 'open-session', sessionId: 42 },
+      { type: 'open-url' }, // 缺 url
+      { type: 'open-url', url: 'javascript:alert(1)' }, // 坏 scheme（注入向量）
+      { type: 'open-url', url: 'not-a-url' },
+      { type: 'open-url', url: 42 },
+    ];
+    for (const v of bad) {
+      assert.equal(normalizeBroadcastIntent(v), undefined, `${JSON.stringify(v)} 应丢弃`);
+    }
   });
 });
 

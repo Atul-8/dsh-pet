@@ -146,7 +146,43 @@ export function readBalance(leaf: StateLeaf): { state: BalanceState; manual: boo
  * 本身就是那个判别位，靠 `startsWith('http')` 嗅探会在名字恰好长得像 URL 时出错。
  */
 export type SayCue =
-  { kind: 'say'; text: string; image?: string; url?: string; duration?: number; anim?: boolean } | { kind: 'clear' };
+  | {
+      kind: 'say';
+      text: string;
+      image?: string;
+      url?: string;
+      duration?: number;
+      anim?: boolean;
+      /** 点击意图（ADR-001，可选）：toast 档位的消费端据此路由点击行为。
+       *  pet 档位 v1 不消费（气泡保持非交互）；字段随叶子透传，老消费者忽略。 */
+      intent?: EventIntent;
+    }
+  | { kind: 'clear' };
+
+/** 事件意图（/broadcast 的 intent 字段收窄形状；ADR-001 §4.3） */
+export interface EventIntent {
+  type: 'open-session' | 'open-url';
+  /** open-session 必填：DSH 会话 id（语法不属于本包契约，只做非空校验） */
+  sessionId?: string;
+  /** open-url 必填：http/https 完整地址（与 badge.href 同口径） */
+  url?: string;
+}
+
+/** intent 对象收窄：type 必须在枚举里；对应必填字段缺失 → 整个 intent 丢弃（undefined）。
+ *  与 /badge 富字段同一约定：非法静默丢，事件照投。 */
+export function normalizeIntent(raw: unknown): EventIntent | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const d = raw as { type?: unknown; sessionId?: unknown; url?: unknown };
+  if (d.type === 'open-session') {
+    return typeof d.sessionId === 'string' && d.sessionId.trim()
+      ? { type: 'open-session', sessionId: d.sessionId }
+      : undefined;
+  }
+  if (d.type === 'open-url') {
+    return typeof d.url === 'string' && /^https?:\/\//i.test(d.url) ? { type: 'open-url', url: d.url } : undefined;
+  }
+  return undefined;
+}
 
 /**
  * 类型收窄：宠物说话叶子 → SayCue（形状非法 / 空文本 → null，消费端跳过这一拍）。
@@ -163,6 +199,7 @@ export function readSay(leaf: StateLeaf): SayCue | null {
     duration?: unknown;
     anim?: unknown;
     clear?: unknown;
+    intent?: unknown;
   };
   // 清空指令优先：它不带 text，所以必须排在文本校验**前面**
   if (d.clear === true) return { kind: 'clear' };
@@ -177,6 +214,7 @@ export function readSay(leaf: StateLeaf): SayCue | null {
     // 只认 ≥0 的有限数：非法值当"没给"（写端已校验，这里只是防御，不让脏数据毁掉整拍）
     duration: typeof d.duration === 'number' && Number.isFinite(d.duration) && d.duration >= 0 ? d.duration : undefined,
     anim: typeof d.anim === 'boolean' ? d.anim : undefined,
+    intent: normalizeIntent(d.intent),
   };
 }
 

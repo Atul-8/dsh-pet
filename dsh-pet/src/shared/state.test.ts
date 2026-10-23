@@ -254,6 +254,7 @@ describe('readSay —— 说话叶子（弹气泡 / 清空 两种形态）', () 
       url: undefined,
       duration: undefined,
       anim: undefined,
+      intent: undefined,
     });
   });
 
@@ -261,6 +262,29 @@ describe('readSay —— 说话叶子（弹气泡 / 清空 两种形态）', () 
     const hit = say({ text: 'x', url: 'https://cdn.example.com/拒绝.png' });
     assert.equal(hit?.url, 'https://cdn.example.com/拒绝.png');
     assert.equal(hit?.image, undefined);
+  });
+
+  test('intent 透传（ADR-001）：合法形状原样带到；非法形状丢弃、文本照常', () => {
+    assert.deepEqual(say({ text: 'x', intent: { type: 'open-url', url: 'https://zoho.com/t/101' } })?.intent, {
+      type: 'open-url',
+      url: 'https://zoho.com/t/101',
+    });
+    assert.deepEqual(say({ text: 'x', intent: { type: 'open-session', sessionId: 's-42' } })?.intent, {
+      type: 'open-session',
+      sessionId: 's-42',
+    });
+    // 非法（type 外枚举 / 缺必填 / 非对象）→ undefined，事件照常可读
+    for (const bad of [
+      'nope',
+      42,
+      {},
+      { type: 'nonsense' },
+      { type: 'open-url', url: 'javascript:x' },
+      { type: 'open-session' },
+    ]) {
+      assert.equal(say({ text: 'x', intent: bad })?.intent, undefined, `${JSON.stringify(bad)} 应丢弃`);
+    }
+    assert.equal(say({ text: 'x', intent: { type: 'nonsense' } })?.text, 'x');
   });
 
   test('配图两种形态并列、由字段名区分：两个都给时两个都取到（host 判定层保证不会这么写）', () => {

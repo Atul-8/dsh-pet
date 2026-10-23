@@ -118,6 +118,7 @@ import {
   decideBubbleClear,
   normalizeBroadcastAnim,
   normalizeBroadcastDuration,
+  normalizeBroadcastIntent,
   normalizeBroadcastText,
 } from './broadcast';
 import { decideAnim } from './anim';
@@ -2029,7 +2030,16 @@ export function apply(ctx: any): void {
         // 实际生效的时长与联动开关，调用方不用自己猜缺省是多少。
         // 配图两种形态二选一（判定层保证）：url 形态写 url，名称形态写池内规范名，都没有则纯文本。
         const pic = d.url !== undefined ? { url: d.url } : d.image !== undefined ? { image: d.image } : {};
-        state.writePet(d.petId, 'say', { text: d.text, ...pic, duration: d.duration, anim: d.anim });
+        // intent（ADR-001，可选）：点击意图随叶子透传——形状非法静默丢（与 /badge 富字段
+        // 同一约定），事件照投。消费者是 toast 档位 / 第三方 presenter（pet 档 v1 不消费）。
+        const intent = normalizeBroadcastIntent(o.intent);
+        state.writePet(d.petId, 'say', {
+          text: d.text,
+          ...pic,
+          duration: d.duration,
+          anim: d.anim,
+          ...(intent ? { intent } : {}),
+        });
         return { kind: 'json', status: 200, obj: { ok: true } };
       } catch (e) {
         // 配置读取失败等（安装损坏）→ 显式失败，不静默

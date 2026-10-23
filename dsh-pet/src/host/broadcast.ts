@@ -52,6 +52,33 @@ export type BroadcastDecision =
 /** 清空气泡的决策结论（只有宠物解析这一步会失败） */
 export type BubbleClearDecision = { ok: true; petId: string } | { ok: false; reason: PetFailure; message: string };
 
+/** 事件意图（/broadcast 的 intent 字段，ADR-001 §4.3）。
+ *  这是 host 侧的**独立副本**——host 不 import src/shared（同 Corner / PetFacing 的处理），
+ *  消费端副本在 src/shared/state.ts（readSay），两份形状必须保持一致。 */
+export interface EventIntent {
+  type: 'open-session' | 'open-url';
+  sessionId?: string;
+  url?: string;
+}
+
+/** intent 对象收窄（与 /badge 富字段同一约定：形状非法**静默丢弃**，事件照投）：
+ *  - `open-session`：sessionId 必须是非空字符串（DSH 会话 id 语法不属于本包契约）；
+ *  - `open-url`：必须 http/https 完整地址（与 badge.href / 配图 url 同一条 scheme 规则）；
+ *  - 其余 type / 缺必填 / 非对象 → undefined。 */
+export function normalizeBroadcastIntent(raw: unknown): EventIntent | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const d = raw as { type?: unknown; sessionId?: unknown; url?: unknown };
+  if (d.type === 'open-session') {
+    return typeof d.sessionId === 'string' && d.sessionId.trim()
+      ? { type: 'open-session', sessionId: d.sessionId }
+      : undefined;
+  }
+  if (d.type === 'open-url') {
+    return typeof d.url === 'string' && /^https?:\/\//i.test(d.url) ? { type: 'open-url', url: d.url } : undefined;
+  }
+  return undefined;
+}
+
 /**
  * 投喂文本规范化：非字符串 / 纯空白 → 空串。
  * 路由与决策层**共用这一条规则**（路由用它先短路掉"空文本"，避免为了一个必然失败的
