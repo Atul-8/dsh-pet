@@ -1,0 +1,32 @@
+fix(helper): /invoke 作用域错位 + source:probe 换 net.request redirect 事件（阶段三活体验证修出）
+
+两个实测撞出来的 bug（DSH 活体 + 本地 17399 冒烟服务器验证）：
+
+① invokeHandlers 表住进了 app.whenReady 回调作用域，而 /invoke 路由在
+   startBridgeCallback（模块顶层函数）里查表——跨作用域够不着，
+   每次调用恒报 invokeHandlers is not defined。修：表提升到模块顶层
+   （与 bridgePending 同区），handlers 注册留在 whenReady（要等 Electron
+   就绪才能建 session/窗口）——表是两边共用的桥，放任一侧都断。
+
+② source:probe 的 session.fetch 方案三连翻车（Electron 43 实测）：
+   - redirect:manual 直接抛 Redirect was cancelled（Chromium net 栈
+     无浏览器 fetch 的 opaqueredirect 语义）
+   - 跟随重定向后 Response.url 不填（空串）——两头拿不到「被 302 去哪」
+   - Headers 也不是裸对象（.get() 才对，r.headers[location] 恒 undefined）
+   修：net.request + redirect:manual + redirect 事件——事件回调带
+   绝对化后的 redirectUrl，正则判 login|signin|sso|auth 即可。
+   另加 20s 硬超时（net.request 无原生 timeout）。
+
+活体验证（DSH 重启 + display:both + 两个 builtin-webview 冒烟源）：
+- smoke-ok（/app → 200）→ 探活 authed:true → 桥环回 POST /badge
+  （source=smoke-ok）→ 心跳注册表 → /state health=alive ✓
+- smoke-redir（/start → 302 /login）→ redirect 事件命中登录正则 →
+  authed:false → 自报 expired + 开登录窗 → /state health=expired +
+  原因透传 ✓
+整链（宿主 tick → /invoke → helper 探活 → 桥环回 → 注册表 → 叶子）全通。
+
+坑位存档：
+- 冒烟服务器不能 Start-Process（随 DSH 重启的任务树被清）——
+  Register-ScheduledTask 起才独立存活
+- 会话环境自带 ELECTRON_RUN_AS_NODE=1（DSH 宿主进程的坑），
+  手动拉 electron 前必须清掉，否则 Cannot find module electron

@@ -586,6 +586,13 @@ let bridgeSeq = 0;
 const bridgePending = new Map();
 let bridgeCallbackUrl = '';
 
+/** source:* 通道 → 处理器（/invoke 路由按 channel 查表调用，ADR-002 阶段三）。
+ *  **必须住模块顶层**：/invoke 路由在 startBridgeCallback（顶层函数）里查这张表，
+ *  而 handlers 注册在 app.whenReady 回调里（要等 app/Electron 就绪才能建 session/
+ *  窗口）——表是两边共用的桥，放任一侧都会让另一侧够不着（实测：放 whenReady 里
+ *  → /invoke 恒报 "invokeHandlers is not defined"）。 */
+const invokeHandlers = new Map();
+
 /** 渲染端请求 → 宿主（请求行带回调 URL）；返回宿主应答（{status, contentType?, body?, file?}），超时抛错 */
 function bridgeRequest(method, url, body) {
   return new Promise((resolve, reject) => {
@@ -1029,30 +1036,49 @@ app.whenReady().then(() => {
   // 窗口表：sourceId -> BrowserWindow（重复请求只 focus 已有窗口）
   const sourceLoginWins = new Map();
   const sourcePartitions = (id) => 'persist:dsh-pet-source-' + String(id).replace(/[^a-zA-Z0-9_-]/g, '-');
-  /** source:* 通道 → 处理器（/invoke 路由按 channel 查表调用） */
-  const invokeHandlers = new Map();
+  // invokeHandlers 表在模块顶层（startBridgeCallback 的 /invoke 路由要查）——这里只注册
 
   invokeHandlers.set('source:probe', async (payload) => {
     const id = payload && typeof payload === 'object' ? String(payload.id || '') : '';
     const url = payload && typeof payload === 'object' ? String(payload.url || '') : '';
     if (!id || !/^https?:[/][/]/.test(url)) return { ok: false, reason: 'bad-request' };
-    try {
-      // 无窗口 fetch：session.fromPartition 拿到该源的持久会话（cookie 自动带）。
-      // redirects: 'manual' —— 目标站多半是「登录页 302」，跟到底反而拿到的是登录页 200，
-      // 误判成已登录；停在第 302 那一跳才看得见「被踢去登录」这个事实。
-      const session = electronApi.session.fromPartition(sourcePartitions(id));
-      const r = await session.fetch(url, { redirect: 'manual', timeout: 15000 });
-      // 3xx 且 Location 指向常见登录路径 → 判失效；200/204 → 活；其余（5xx 等）→ 不确定，
-      // 按「探活失败」处理（宿主会静默退避下一拍再试，不误报 expired）
-      if (r.status >= 300 && r.status < 400) {
-        const loc = String(r.headers['location'] ?? '');
-        return { ok: true, authed: /login|signin|sso|auth/i.test(loc) ? false : undefined };
-      }
-      if (r.status === 200 || r.status === 204) return { ok: true, authed: true };
-      return { ok: true, authed: undefined, status: r.status };
-    } catch (e) {
-      return { ok: false, reason: e instanceof Error ? e.message : String(e) };
-    }
+    // 探活实现：net.request + redirect:'manual' + 'redirect' 事件。
+    // 为什么不用 session.fetch：实测（Electron 43）它 redirect:'manual' 直接抛
+    // "Redirect was cancelled"（Chromium net 栈无浏览器 fetch 的 opaqueredirect 语义），
+    // 跟随重定向后 Response.url 又不填（空串）——两头都拿不到「被 302 去哪」。
+    // net.request 的 manual 模式下 'redirect' 事件带**绝对化后的** redirectUrl，
+    // 正好是判定「被踢去登录页」的全部所需。cookie 由分区自动携带（session 选项）。
+    const ses = electronApi.session.fromPartition(sourcePartitions(id));
+    return await new Promise((resolve) => {
+      let settled = false;
+      let to = null;
+      const finish = (r) => {
+        if (settled) return;
+        settled = true;
+        if (to) clearTimeout(to);
+        try {
+          req.abort(); // 探活只要状态/去向，不留连接（已到 response 的 abort 无害）
+        } catch {}
+        resolve(r);
+      };
+      const req = electronApi.net.request({ url, session: ses, redirect: 'manual' });
+      // 20s 硬超时（net.request 无原生 timeout；宿主侧 invokeSource 另有 20s AbortSignal 兜底）
+      to = setTimeout(() => finish({ ok: false, reason: 'timeout' }), 20000);
+      req.on('redirect', (statusCode, _method, redirectUrl) => {
+        // 302 落点像登录页 → 失效；不像（应用内跳转等）→ 不确定（缺省，不误报）
+        finish({
+          ok: true,
+          authed: /login|signin|sso|auth/i.test(redirectUrl) ? false : undefined,
+          redirect: redirectUrl,
+        });
+      });
+      req.on('response', (response) => {
+        const s = response.statusCode;
+        finish({ ok: true, authed: s === 200 || s === 204 ? true : undefined, status: s });
+      });
+      req.on('error', (e) => finish({ ok: false, reason: String(e && e.message ? e.message : e) }));
+      req.end();
+    });
   });
 
   invokeHandlers.set('source:login-open', async (payload) => {
