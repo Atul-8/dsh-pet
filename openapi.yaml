@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: dsh-pet HTTP API
-  version: 0.3.8
+  version: 0.4.0
   summary: DSH 桌宠插件的宿主 HTTP 接口
   description: |
     dsh-pet 的宿主（host）半侧通过 DSH 的 `webServer` 服务注册**一条前缀路由** `/dsh-pet-7340`，
@@ -17,7 +17,9 @@ info:
       也就是 `dsh web` 启动时打印的地址（未显式指定端口时默认 3080）。
       插件本身不固定监听端口，只往宿主的 Web 服务上挂路由。
     - **固定端口本地桥（v0.3.8+）**：宿主同时在 `127.0.0.1:7340`（被占顺延 7341~7344）常驻监听，
-      v0.3.9 起开放 `GET /state`、`POST /badge`、`POST /broadcast` 三个端点（其余 404）。给浏览器侧
+      v0.3.9 起开放 `GET /state`、`POST /badge`、`POST /broadcast` 三个端点（其余 404）。
+      v0.4.0 起三端点请求体均可带 `source` 字段（数据源身份，ADR-002）——命中用户配置 `sources[]`
+      里声明的 id 即参与健康判定；匿名投喂照常受理（绝不拒收）。给浏览器侧
       脚本（油猴/自研扩展）与宿主侧本地工具（其他插件的事件适配器，如 seeed-ts 的 pet-bridge）
       一个**不随 DSH 重启漂移**的固定投喂入口——DSH 端口每次重启都换，外部脚本不应依赖它。
       同一暴露面口径：仅绑 127.0.0.1、无鉴权、徽标与气泡都是展示层信息。
@@ -87,6 +89,8 @@ servers:
       用途：浏览器侧脚本（油猴/自研扩展）与宿主侧本地工具（其他插件的事件适配器）的
       固定投喂入口——DSH Web 端口每次重启都会变，外部脚本不应依赖它；桥端口不变，
       DSH 重启后链路自动恢复。语义与 DSH 路由**同一份实现**。
+      v0.4.0：三端点请求体均可带 `source`（数据源身份，ADR-002）——匿名照常受理；
+      独立应用形态（`dsh-pet.exe`）同样持有这座桥（占 7340 时自动顺延）。
 
 tags:
   - name: State
@@ -1390,7 +1394,7 @@ paths:
         - name: id
           in: path
           required: true
-          description: '`POST /anim` 响应里的 `playbackId`。'
+          description: "`POST /anim` 响应里的 `playbackId`。"
           schema:
             type: string
           example: pb-mfh2k1-1
@@ -1423,7 +1427,16 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [playbackId, petId, name, status, createdAt, updatedAt, matched]
+                required:
+                  [
+                    playbackId,
+                    petId,
+                    name,
+                    status,
+                    createdAt,
+                    updatedAt,
+                    matched,
+                  ]
                 properties:
                   playbackId:
                     type: string
@@ -1455,7 +1468,7 @@ paths:
                       所以它确实不会再播完，是"打断"而不是"暂停"）。
                   matched:
                     type: boolean
-                    description: '`true` = 等到了 `wait` 里的状态；`false` = 超时返回'
+                    description: "`true` = 等到了 `wait` 里的状态；`false` = 超时返回"
         "400":
           description: |
             参数非法，`{ "error": "..." }`：`wait` 与 `timeout` 未成对
@@ -1500,7 +1513,7 @@ paths:
         - name: id
           in: path
           required: true
-          description: '`playbackId`。'
+          description: "`playbackId`。"
           schema:
             type: string
           example: pb-mfh2k1-1
@@ -1515,7 +1528,7 @@ paths:
                 status:
                   type: string
                   enum: [playing, ended, failed, cancelled]
-                  description: '只接受这四个——`accepted` 是宿主受理态，上报它回 400。'
+                  description: "只接受这四个——`accepted` 是宿主受理态，上报它回 400。"
                 reason:
                   type: string
                   description: |
@@ -1545,7 +1558,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/OkResponse"
         "400":
-          description: '非法状态名（含 `accepted`）或请求体不是合法 JSON'
+          description: "非法状态名（含 `accepted`）或请求体不是合法 JSON"
           content:
             application/json:
               schema:
@@ -1708,7 +1721,7 @@ paths:
         - **只白名单字段会被保留**：`pets[]` 的 `id`/`name`/`size`/`balanceEnabled`/
           `whisperEnabled`/`workStatusEnabled`/`fixedEnabled`/`display`/`position`，以及顶层
           `notificationsEnabled`/`whisperImageEnabled`/`chatImageEnabled`/`confineToScreen`/
-          `physics`/`whisperModel`/`chatModel`/`chatMemoryRounds`/`chatImageLimit`。
+          `trayEnabled`/`presenter`/`physics`/`whisperModel`/`chatModel`/`chatMemoryRounds`/`chatImageLimit`/`font`。
           其余字段会沿用磁盘上用户文件里的原值（透传保留），所以设置页保存
           **不会抹掉**你手写的精调配置（`whisperPrompt`/`memes`/`eventsRefreshSec` 等）。
           白名单字段也只在请求体**真的传了**时才算白名单：没传就走透传，不会被抹成默认值。
@@ -3634,6 +3647,15 @@ components:
           type: boolean
         confineToScreen:
           type: boolean
+        presenter:
+          type: string
+          enum: [pet, toast, both]
+          description: |
+            渲染档位（ADR-001，条目级、全部实例共享；只影响 web 端，桌面窗口不受影响）：
+            `pet`=宠物 DOM+头顶气泡（缺省老行为）/ `toast`=不挂宠物——事件走页面右下角
+            毛玻璃浮层 + 视口角落常驻计数片 / `both`=两者都要。
+            toast 点击可按投喂方带的 `intent` 深链（开网页 / 唤起 DSH 会话）。
+            非法值整包 400；没带 → 透传保留磁盘旧值（手编的 toast 档不会被保存抹掉）。
         chatMemoryRounds:
           type: integer
           minimum: 0
@@ -3677,6 +3699,13 @@ components:
         display:
           type: string
           enum: [web, desktop, both, none]
+        presenter:
+          type: string
+          enum: [pet, toast, both]
+          description: |
+            渲染档位（ADR-001，条目级吹入每只实例；只影响 web 端）：
+            `pet`=宠物+气泡（缺省）/ `toast`=页内浮层+角落计数片（不挂宠物 DOM）/
+            `both`=两者。详见 `SaveConfigRequest.presenter`。
         position:
           $ref: "#/components/schemas/Position"
         whisperPrompt:

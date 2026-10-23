@@ -1,0 +1,22 @@
+chore(release): 0.4.0 版本收口——四处版本统一 + openapi presenter 契约补全
+
+0.4.0 是「事件与数据源」大版本（ADR-001 + ADR-002 全量落地）：
+- ADR-001：intent 事件意图 + presenter 渲染档位（pet/toast/both）+ toast 层
+- ADR-002：source 数据源注册表 + 新鲜度看门狗 + builtin-webview 会话看门人
+- 独立应用形态（electron-builder 打包）与 DSH 插件形态双壳并存
+- 桥三门（/state /badge /broadcast）公开给 origin-less 调用方
+
+版本四处统一：
+- dsh-pet/package.json：0.3.9 → 0.4.0
+- openapi.yaml：info.version 0.3.8 → 0.4.0（+ 桥描述补 v0.4.0 的
+  source 字段与独立应用形态说明）
+- 两份 ADR：影响包行加「已随 0.4.0 发布」落款
+- dsh.compatibility.dshReleases 保持 0.2.1-rc.2 compatible（无新宿主依赖）
+
+openapi 契约补全（此前缺口）：
+- SaveConfigRequest.presenter（三枚举 + 非法整包 400 + 没带透传保留
+  的语义说明）——PUT /config 白名单清单同步补 trayEnabled/font
+- PetConfigEntry.presenter（GET /config 成品聚合里条目吹入的字段）
+- 170 个 $ref 全部可解析（check-openapi 过）
+
+门禁：format / check:openapi / 1064 测试 fail 0。
