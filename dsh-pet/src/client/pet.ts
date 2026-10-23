@@ -31,6 +31,7 @@ import {
   readBadge,
   readSources,
   takeChanged,
+  type EventIntent,
   type PollState,
   type PositionMode,
   type SayCue,
@@ -42,6 +43,7 @@ import {
 import { WORK_STATUS_INDEX, type WorkStatusSnapshot } from '../shared/work-status';
 import { makeBalanceBubble, makeWhisperBubble } from './bubble';
 import { makeBadge } from './badge';
+import { consumeIntent, makeCountChip, makeToastLayer, type ToastItem } from './toast';
 import { clickScore, SCORE_MIN_SPEED, mountScorePopup, spawnScoreBurst } from '../shared/score-popup';
 import {
   CANVAS_H,
@@ -226,6 +228,10 @@ export function makePetUI(rt: {
   // 用 React 命名空间类型而非 typeof：type-only import 的 hook 无法进入声明导出（TS4078）
   useEffect: (effect: ReactNS.EffectCallback, deps?: ReactNS.DependencyList) => void;
   useRef: <T>(initial: T) => ReactNS.MutableRefObject<T>;
+  /** openSession（toast 档 intent 消费，ADR-001）：装配层（app.ts）注入的会话唤起器；
+   *  惰性取值同 notify.ts——uiWorkspace 可能晚注册。返回 false/undefined = 服务不可用，
+   *  toast 点击降级为 focus 窗口。缺省 null = 永远降级（standalone 壳等场景）。 */
+  openSession?: ((sessionId: string) => boolean | null) | null;
 }): () => ReactNode {
   const { h, useState, useEffect, useRef } = rt;
   injectCss();
@@ -236,6 +242,9 @@ export function makePetUI(rt: {
   const WhisperBubble = makeWhisperBubble({ h });
   /** 常驻计数徽标（哑组件：数据由 PetCard 传入；count>0 时常驻显示，与数据源无关） */
   const Badge = makeBadge({ h });
+  /** 事件 toast 层 + 计数片（ADR-001 阶段二：presenter 档位 = toast/both 时的事件去向） */
+  const ToastLayer = makeToastLayer({ h, useState, useEffect });
+  const CountChip = makeCountChip({ h });
 
   /** 单个宠物实例（配置由容器 PetMulti 传入；碎碎念轮询/触发/气泡完全自理） */
   function PetCard({
@@ -2436,6 +2445,9 @@ export function makePetUI(rt: {
   function PetMulti() {
     const [pets, setPets] = useState<Pet[]>([]);
     const [ready, setReady] = useState(false);
+    // openSession（toast 档 intent 消费，ADR-001）：工厂参数存 ref——ToastLayer 的
+    // onIntent 回调永远拿到装配层注入的那份取值器（内部惰性取 ctx，与 notify.ts 同降级哲学）
+    const openSessionRef = useRef<((sessionId: string) => boolean | null) | null>(rt.openSession ?? null);
     // 共享碰撞站场（宠物间碰撞）：每只 PetCard 注册自己的槽位；飞行中的宠物在 startThrow
     // 每帧读数碰撞。纯 ref 同步，不触发 React 重渲染。
     const arenaRef = useRef<{ slots: Record<string, PetCollisionSlot> }>({ slots: {} });
@@ -2479,7 +2491,17 @@ export function makePetUI(rt: {
     const [workStatusTick, setWorkStatusTick] = useState(0);
     // 说话（碎碎念 / 命令气泡 / 对话回复三合一）：容器统一轮询 /state 的 pets.<id>.say，
     // 按宠物分发到对应 PetCard（sayRef + sayTick；见下方统一轮询与 PetCard 的 say 分支）。
-
+    // toast 档位（ADR-001 阶段二）：同一份 say 事件同时进 toast 队列（pet 档不渲染 ToastLayer，
+    // 队列照常推进无害——ToastLayer 只在 presenter=toast/both 的宠物存在时挂载）。
+    const [toasts, setToasts] = useState<ToastItem[]>([]);
+    const toastSeqRef = useRef(0);
+    const pushToastRef = useRef<(petId: string, cue: SayCue & { seq: number }) => void>(() => {});
+    pushToastRef.current = (petId, cue) => {
+      if (cue.kind !== 'say') return; // clear 指令只对气泡有意义；toast 到点自己收
+      toastSeqRef.current += 1;
+      const item: ToastItem = { seq: toastSeqRef.current, petId, cue };
+      setToasts((list) => [...list.slice(-4), item]); // 最多同屏 5 条，防刷屏钉满角落
+    };
     // 字体族（全局配置 font.family）→ documentElement 上的全局变量：对话窗与得分弹窗挂在 body 下、
     // 继承不到宠物根容器，只能走全局；气泡与悬浮提示也一并从这里继承。
     // 多只宠物的 font 同值（配置只有一份），重复设置无副作用；列表为空（配置尚未加载）时不动。
@@ -2546,6 +2568,16 @@ export function makePetUI(rt: {
 
     // 浏览器 overlay 只渲染 display ∈ {web, both} 的宠物；desktop / none 不参与网页显示
     const visiblePets = pets.filter((p) => isWebVisible(p.display));
+
+    // presenter 档位（ADR-001 §4.1，条目级，缺省 pet）：
+    //  - pet：visiblePets 照常渲染（现状）；
+    //  - toast：**不挂载**宠物 DOM——事件走页内 toast 浮层（say）+ 视口角落计数片（badge）；
+    //  - both：宠物照常挂载 + ToastLayer 也挂（通知层双通道；聚焦门 v2 再加，先都显示）。
+    // 判定按**宠物实例**取（条目级字段拍平时吹入每只）；任一 web 可见实例声明 toast/both
+    // 即挂 ToastLayer + CountChip（toast 实例的 PetCard 不渲染）。
+    const toastPets = visiblePets.filter((p) => p.presenter === 'toast' || p.presenter === 'both');
+    const petOnlyPets = visiblePets.filter((p) => p.presenter !== 'toast');
+    const hasToastSink = toastPets.length > 0;
 
     // ---- 统一轮询（GET /state，1s）：前端**唯一**的数据来源与渲染入口 ----
     // 每个叶子 = { counter, data }：首拉只记基线（不渲染——避免刷新页面时重放旧气泡），
@@ -2630,8 +2662,12 @@ export function makePetUI(rt: {
             const petId = path.slice('pets.'.length, -'.say'.length);
             const said = readSay(leaf);
             if (said) {
-              sayRef.current[petId] = { ...said, seq: (sayRef.current[petId]?.seq ?? 0) + 1 };
+              const wrapped = { ...said, seq: (sayRef.current[petId]?.seq ?? 0) + 1 };
+              sayRef.current[petId] = wrapped;
               setSayTick((t) => t + 1);
+              // toast 队列双投（ADR-001 阶段二）：pet 档下 ToastLayer 不挂载、队列推进无害；
+              // toast/both 档下这就是事件的去向（消费 cue.intent 的点击路由）。
+              pushToastRef.current(petId, wrapped);
             }
           } else if (path.startsWith('pets.') && path.endsWith('.anim')) {
             // 点播动画叶子：路径形如 pets.<id>.anim。同样按前缀/后缀切片，绝不 split('.')。
@@ -2709,31 +2745,44 @@ export function makePetUI(rt: {
     }, [ready]);
 
     return ready
-      ? visiblePets.map((p) =>
-          h(PetCard, {
-            key: p.id,
-            cfg: p as RuntimePet,
-            balance,
-            balanceTick,
-            balanceNoticeTick,
-            balanceManual,
-            workStatus,
-            workStatusTick,
-            say: sayRef.current[p.id],
-            sayTick,
-            animCue: animCueRef.current[p.id],
-            animCueTick,
-            posCue: posCueRef.current[p.id],
-            posCueTick,
-            throwCue: throwCueRef.current[p.id],
-            throwCueTick,
-            lock: lockRef.current[p.id],
-            lockTick,
-            badge,
-            sources,
-            arena: arenaRef,
-          }),
-        )
+      ? [
+          // presenter ≠ toast 的实例照常渲染宠物 DOM（pet / both 两档；undefined = pet 老行为）
+          ...petOnlyPets.map((p) =>
+            h(PetCard, {
+              key: p.id,
+              cfg: p as RuntimePet,
+              balance,
+              balanceTick,
+              balanceNoticeTick,
+              balanceManual,
+              workStatus,
+              workStatusTick,
+              say: sayRef.current[p.id],
+              sayTick,
+              animCue: animCueRef.current[p.id],
+              animCueTick,
+              posCue: posCueRef.current[p.id],
+              posCueTick,
+              throwCue: throwCueRef.current[p.id],
+              throwCueTick,
+              lock: lockRef.current[p.id],
+              lockTick,
+              badge,
+              sources,
+              arena: arenaRef,
+            }),
+          ),
+          // toast 档（有实例声明时挂载）：事件浮层堆叠 + 角落计数片（badge 的无宠物载体）
+          hasToastSink
+            ? h(ToastLayer, {
+                key: 'dsh-pet-toasts',
+                items: toasts,
+                onClose: (seq: number) => setToasts((list) => list.filter((it) => it.seq !== seq)),
+                onIntent: (intent: EventIntent | undefined) => consumeIntent(intent, openSessionRef.current),
+              })
+            : null,
+          hasToastSink ? h(CountChip, { key: 'dsh-pet-chip', state: badge }) : null,
+        ]
       : null;
   }
 

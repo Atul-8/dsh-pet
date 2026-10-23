@@ -34,6 +34,15 @@ export interface Rect {
  */
 export type PetDisplay = 'web' | 'desktop' | 'both' | 'none';
 
+/** 渲染档位（ADR-001 §4.1，条目级字段，缺省 'pet' 老行为零迁移）：
+ *  - pet：挂宠物 DOM，事件走气泡/徽标/动作（现状，不动）；
+ *  - toast：**不挂载**宠物 DOM——say → 页内 toast 浮层，badge → 视口角落计数片；
+ *  - both：宠物照常挂载，toast 只在页面**失焦**时弹（复用 notify.ts 的聚焦门哲学）。
+ *  只影响 web 渲染端的选择；桌面端（Electron 窗口）不受此字段影响（N3）。
+ *  surface 契约不动：toast 档下 display 仍是 web——anim/position 等端点照常受理，
+ *  "渲染端选择不画"的判定权在渲染端（见 ADR-001 §4.1 的 surface 规避说明）。 */
+export type PresenterMode = 'pet' | 'toast' | 'both';
+
 /** 移动动作：一个动作名 + 可选覆盖参数（未写字段取 moves.default） */
 export interface MoveSpec {
   name: string;
@@ -119,6 +128,9 @@ export interface Pet {
   fixedEnabled: boolean;
   /** 显示位置（web/desktop/both/none，必填）：缺失即配置错误，代码不做兜底 */
   display: PetDisplay;
+  /** 渲染档位（条目级字段，缺省 'pet'）：拍平时由 flattenConfigPets 从所属条目顶层吹入。
+   *  老配置没有这个字段 → undefined → 消费端按 'pet' 走（零迁移）。 */
+  presenter?: PresenterMode;
   position: { corner: Corner; marginX: number; marginY: number };
   /** **实例级人设**（可选，`pets[].whisperPrompt`）：碎碎念与对话共用的系统提示词正文。
    *  写了就**取代**所属条目顶层那一份（替换，不是拼接）；没写/空串 = 回落条目。回落发生在

@@ -397,6 +397,9 @@ function topFieldValid(key: string, value: unknown): boolean {
     }
     case 'notificationsEnabled':
       return typeof value === 'boolean';
+    case 'presenter':
+      // 渲染档位（ADR-001 §4.1，条目级）：pet/toast/both 三枚举；缺省 = pet（老行为零迁移）
+      return value === 'pet' || value === 'toast' || value === 'both';
     case 'whisperImageEnabled':
       return typeof value === 'boolean';
     case 'chatImageEnabled':

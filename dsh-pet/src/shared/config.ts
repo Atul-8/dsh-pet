@@ -6,7 +6,16 @@
 // workStatusTexts / whisperModel / chatModel）吹进每只实例——它们都是「所属条目一份、多实例共享」；
 // 其中 10 个「全局默认」字段的条目值来自用户层（main-config.jsonc），见 types.ts / host/config.ts。
 // 不依赖 React/DOM；host 因 DSH 单文件加载约束不 import 本目录。
-import type { Animations, FontConfig, ModelSelection, Pet, PetDisplay, PhysicsParams, Weights } from './types';
+import type {
+  Animations,
+  FontConfig,
+  ModelSelection,
+  Pet,
+  PetDisplay,
+  PhysicsParams,
+  PresenterMode,
+  Weights,
+} from './types';
 
 /** 显示位置白名单 */
 export const PET_DISPLAYS: PetDisplay[] = ['web', 'desktop', 'both', 'none'];
@@ -39,6 +48,7 @@ export function flattenConfigPets(merged: Record<string, Record<string, unknown>
         workStatusTexts: conf.workStatusTexts as string[][] | undefined,
         whisperModel: conf.whisperModel as ModelSelection | undefined,
         chatModel: conf.chatModel as ModelSelection | undefined,
+        presenter: conf.presenter as PresenterMode | undefined,
         assetRoot: entry,
         extra: entry !== 'main',
       });

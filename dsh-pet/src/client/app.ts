@@ -58,7 +58,21 @@ export function makeFactory(): (require: (mod: string) => any) => any {
     }
 
     // 宠物页面（overlay）与配置设置页：组件各自独立文件，这里只组装 + 注册
-    const PetMulti = makePetUI({ h, useState, useEffect, useRef });
+    // openSession（toast 档的 intent 消费，ADR-001）：惰性取值同 notify——uiWorkspace
+    // 可能晚注册、旧版 DSH 没有；取不到时 toast 点击降级为 focus 窗口（见 toast.ts）。
+    // 注意在 apply 外拿不到 ctx，所以先存窗口引用（apply 第一行回填），消费时才调用。
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- DSH 注入 ctx 无静态类型
+    const dshCtxRef: { current: any } = { current: null };
+    const PetMulti = makePetUI({
+      h,
+      useState,
+      useEffect,
+      useRef,
+      openSession: (sessionId: string) => {
+        const ws = dshCtxRef.current?.get?.('uiWorkspace');
+        return typeof ws?.openSession === 'function' ? ws.openSession(sessionId) : null;
+      },
+    });
 
     const name = 'pet';
     // commandUi 写成服务依赖（与官方 client-ui-permission-presets 的写法一致）：
@@ -66,6 +80,7 @@ export function makeFactory(): (require: (mod: string) => any) => any {
     const inject = ['slots', 'locale', 'connection', 'remote', 'remote.commands', 'commandUi'];
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- DSH 注入的 ctx（locale/slots/webServer 等 service 无静态类型）
     function apply(ctx: any) {
+      dshCtxRef.current = ctx; // toast 档 intent 消费用（openSession 惰性取值，见上方组装处）
       // 本地化字典（设置页文案）
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-pet: dictionaries');
       const t = ctx.locale.bind(NS);

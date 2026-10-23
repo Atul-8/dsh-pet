@@ -80,6 +80,24 @@ describe('flattenConfigPets —— 成品 → 渲染列表的唯一填充点', (
     assert.deepEqual(pet.animations, ['a.webm']);
   });
 
+  test('presenter（ADR-001 渲染档位）：条目顶层写了吹进每只实例；没写 = undefined（= pet 老行为）', () => {
+    const merged = {
+      main: {
+        presenter: 'toast',
+        pets: [{ id: 'a' }, { id: 'b' }],
+      },
+      other: {
+        pets: [{ id: 'c' }],
+      },
+    };
+    const pets = flattenConfigPets(merged as Record<string, Record<string, unknown>>);
+    const byId = Object.fromEntries(pets.map((p) => [p.id, p]));
+    // main 条目两实例都拿到 toast；other 条目没写 → undefined（消费端按 pet 走，零迁移）
+    assert.equal(byId.a.presenter, 'toast');
+    assert.equal(byId.b.presenter, 'toast');
+    assert.equal(byId.c.presenter, undefined);
+  });
+
   test('实例级人设 whisperPrompt：原样带出，不参与条目级覆盖（回落由 host 消费端做）', () => {
     const merged = {
       main: {
