@@ -61,19 +61,29 @@ export interface MenuBranch {
 export type MenuNode = MenuLeaf | MenuBranch;
 
 /**
- * 「显示位置」子菜单 —— 桌面端与浏览器端注入**同一份**（文案与设置页「显示位置」下拉框一致）。
+ * 「显示位置」子菜单 —— 桌面端与浏览器端注入**同一份**（取值绝不漂移；文案随宿主视角变）。
  *
- * 为什么必须放 shared：两端各写一份必然漂移（改了一端的文案或取值，另一端没跟上），而这一项在
- * 两端语义完全对称——桌面端用它把宠物"送走"（仅网页），浏览器端用它把宠物"送到桌面"（仅桌面）。
+ * 为什么必须放 shared：两端各写一份必然漂移（改了一端的取值，另一端没跟上），而这一项在
+ * 两端语义完全对称——桌面端用它把宠物"送走"，浏览器端用它把宠物"送到桌面"。
  *
- * 只有「都不」是单向门（两端都不显示，恢复入口是设置页的下拉框）；其余三个值都能从某一端改回来
- * （仅网页→浏览器里还在，仅桌面→桌面上还在，两者→两端都在）。设置页那条路在本菜单出现之前就是
- * 唯一入口，本菜单只是多加了一条更近的路，没有削弱任何既有能力。
+ * `host` 参数 = 谁在问：同一个 display 值在两端的**体感**不同——
+ *   - 桌面端视角：`web` = 把宠物从桌面收走（用户体感就是「隐藏」——宠物其实还在网页里，
+ *     唤醒入口在托盘，见 runtime/electron-helper/main.js 的 startTray），所以桌面端把
+ *     这一项叫「隐藏」；其余三项保持字面（仅桌面/两者/都不）。
+ *   - 浏览器端视角：`web` = 宠物留在网页里（字面准确），保持「仅网页」。
+ *
+ * 只有「都不」是单向门（两端都不显示，恢复入口是设置页的下拉框或托盘）；其余三个值都能
+ * 从某一端改回来（隐藏→托盘唤醒，仅桌面→桌面上还在，两者→两端都在）。
  */
-export const displayMenuBranch = (): MenuBranch => ({
+export type DisplayMenuHost = 'desktop' | 'web';
+export const displayMenuBranch = (host: DisplayMenuHost = 'web'): MenuBranch => ({
   label: '显示位置',
   children: [
-    { label: '仅网页', action: 'set-display', display: 'web' },
+    {
+      label: host === 'desktop' ? '隐藏' : '仅网页',
+      action: 'set-display',
+      display: 'web',
+    },
     { label: '仅桌面', action: 'set-display', display: 'desktop' },
     { label: '两者', action: 'set-display', display: 'both' },
     { label: '都不', action: 'set-display', display: 'none' },

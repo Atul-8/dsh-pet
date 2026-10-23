@@ -2261,9 +2261,10 @@ export function makePetUI(rt: {
         { label: '回到初始位置', action: 'home' },
         // 调整大小（滑杆实时预览 + 确认写配置）：本地交互，不需要宿主配合
         { label: '调整大小', action: 'set-size' },
-        // 显示位置（仅网页/仅桌面/两者/都不）：与桌面端注入**同一份**子菜单。
+        // 显示位置（仅网页/仅桌面/两者/都不）：与桌面端**同一份**子菜单，host='web'
+        //（本端视角 web=留在网页，字面准确；桌面端把同一项叫「隐藏」——它的视角里那是收走）。
         // 改成不含 web 的值（仅桌面/都不）后，本宠物会随即从 visiblePets 里消失——字面意义上的"自己走掉"。
-        displayMenuBranch(),
+        displayMenuBranch('web'),
       ];
       const tree: MenuNode[] = [...tools, ...buildMenuTree(petAnims), ...(more ? [more] : [])];
       if (!tree.length) return;

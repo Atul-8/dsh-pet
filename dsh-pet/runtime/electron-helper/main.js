@@ -774,8 +774,9 @@ function trayIcon() {
 }
 
 /**
- * 建托盘：列出**配置里全部**宠物（含 display 为 web/none 的——它们当前不在桌面上、勾是空的，
- * 点一下就能送回来，这是托盘相对宠物右键菜单的增量）。勾 = 当前 display 含 desktop/both。
+ * 建托盘：列出**配置里全部**宠物（含 display 为 web/none 的——它们当前不在桌面上、
+ * 菜单项写「唤醒」，点一下就能送回来，这是托盘相对宠物右键菜单的增量：右键菜单里那项
+ * 叫「隐藏」，藏起来后菜单本身也没了，本菜单是唯一的唤醒入口）。在桌面的写「隐藏」。
  */
 async function startTray() {
   try {
@@ -807,8 +808,11 @@ async function startTray() {
     tray.setToolTip('dsh-pet 桌面宠物');
     tray.setContextMenu(
       Menu.buildFromTemplate([
+        // 动词标签（隐藏/唤醒）而非裸宠物名勾选框：勾选语义（勾=在桌面）对首次用户不直观——
+        // 藏起来的宠物要能被「唤醒」回来，这是托盘存在的核心理由（见本节开头注释）。
+        // 唤醒后的值 = toggleDisplay 的落点（web→both、none→desktop），浏览器位保持不动。
         ...pets.map((pet) => ({
-          label: pet.name || pet.id,
+          label: (isDesktopDisplay(pet.display) ? '隐藏' : '唤醒') + '「' + (pet.name || pet.id) + '」',
           type: 'checkbox',
           checked: isDesktopDisplay(pet.display),
           click: () => traySetPetDisplay(pet.id, toggleDisplay(pet.display)),
