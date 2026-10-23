@@ -371,6 +371,14 @@ export const zh = {
   uninstallStep3:
     '3. 按需删除上面的位置：缓存类删了无影响；「插件用户数据」删了会丢配置与对话记忆（想保留就先备份其中的 main-config.jsonc）。',
   uninstallCmd: 'dsh plugin --profile {profile} remove dsh-pet',
+  // 渲染档位卡（ADR-001 阶段二收尾）
+  presenterTitle: '渲染档位',
+  presenterHint:
+    '事件以什么形态到达你（ADR-001）。宠物 = 桌宠本体 + 头顶气泡（现状）；透明弹窗 = 不挂宠物，事件走页面右下角浮层 + 角落计数片（点击浮层可按投喂方带的意图深链：开网页 / 唤起会话）；两者都要 = 宠物照常 + 浮层补充。只影响网页端——桌面窗口不受此档位影响。改完随「保存」生效，刷新页面后切换形态。',
+  presenterLabel: '事件呈现方式',
+  presenterPet: '宠物（缺省）',
+  presenterToast: '透明弹窗（不挂宠物）',
+  presenterBoth: '两者都要',
   // 数据源卡（ADR-002 阶段二）
   sourcesTitle: '数据源',
   sourcesHint:
@@ -579,6 +587,14 @@ export const en = {
   uninstallStep3:
     '3. Delete the locations above as needed: cache folders are harmless; deleting "plugin user data" loses your config and chat memory (back up main-config.jsonc first if you want to keep it).',
   uninstallCmd: 'dsh plugin --profile {profile} remove dsh-pet',
+  // Presenter card (ADR-001 stage 2 finale)
+  presenterTitle: 'Presenter Mode',
+  presenterHint:
+    'How events reach you (ADR-001). Pet = the desktop pet itself with speech bubbles (default); Toast = no pet DOM — events go to in-page toasts in the bottom-right corner plus a corner count chip (clicking a toast follows the intent the feeder attached: open URL / open session); Both = pet as usual plus toasts. Web-side only — the desktop window ignores this setting. Takes effect on Save; refresh the page to see the new form.',
+  presenterLabel: 'Event presentation',
+  presenterPet: 'Pet (default)',
+  presenterToast: 'Toasts only (no pet)',
+  presenterBoth: 'Both',
   // Data sources card (ADR-002 stage 2)
   sourcesTitle: 'Data Sources',
   sourcesHint:
@@ -1099,6 +1115,10 @@ export function makePetConfigSection(rt: {
     // 同上：只改本地状态，随「保存」整包写入。初值 10 = 内置默认（砍掉整张清单的约 2/3 开销）；
     // 加载效应会用成品 main.chatImageLimit 覆盖。
     const [chatImageLimit, setChatImageLimit] = useState(10);
+    // 渲染档位（ADR-001，条目级字段）：pet=宠物 DOM+气泡（缺省老行为）/ toast=不挂宠物、
+    // 事件走页内 toast 浮层+角落计数片 / both=两者。设置页下拉框三选一，随「保存」写入
+    // main-config 顶层（saveUserConfig 白名单已收 presenter）。初值 pet = 内置默认基座键。
+    const [presenter, setPresenter] = useState<'pet' | 'toast' | 'both'>('pet');
     // 条目级人设（main 那一份 whisperPrompt）：设置页只编辑**实例级**覆盖（pets[].whisperPrompt），
     // 这个值只用于"留空时跟随什么"的预览（输入框占位符 + 问号说明），不参与提交。
     const [entryPrompt, setEntryPrompt] = useState('');
@@ -1145,6 +1165,10 @@ export function makePetConfigSection(rt: {
       // 对话配图张数上限：同上（内置默认 0 = 不限制）
       const cil = Number(m.chatImageLimit);
       if (Number.isFinite(cil) && cil >= 0) setChatImageLimit(cil);
+      // 渲染档位：成品已填满（基座键 "presenter": "pet" ← 用户层覆盖）；合法三值才上屏
+      if (m.presenter === 'pet' || m.presenter === 'toast' || m.presenter === 'both') {
+        setPresenter(m.presenter);
+      }
     }, []);
 
     useEffect(() => {
@@ -1331,6 +1355,9 @@ export function makePetConfigSection(rt: {
           // 字体（全局默认白名单字段）：宿主用 fontValid 整段校验（family 白名单 / size 4~200 /
           // followPet 布尔）；传了就整段写进用户层，没传则透传保留磁盘旧值
           font: font,
+          // 渲染档位（ADR-001，条目级白名单字段）：宿主 topFieldValid 三枚举校验；
+          // 传了就写进用户层，没传则透传保留（手编的 toast 档不会被保存抹掉）
+          presenter: presenter,
         };
         // force === true（用户在损坏弹窗里点了确认）：带 ?force=1 才允许按白名单重建损坏文件
         const res = await fetch('/dsh-pet-7340/config' + (force === true ? '?force=1' : ''), {
@@ -1881,6 +1908,36 @@ export function makePetConfigSection(rt: {
                 ),
               ],
             }),
+          ],
+        }),
+
+        // 渲染档位卡（ADR-001 阶段二收尾）：presenter 三选一下拉框。
+        // pet=宠物 DOM+气泡（现状）/ toast=不挂宠物，事件走页内浮层+角落计数片 /
+        // both=两者都要。只改本地状态，随「保存」写 main-config 顶层（host 白名单已收）。
+        // 保存后 petBridge.reload 生效（toast 档下刷新页面即可看到浮层形态）。
+        h('div', {
+          className: 'dsh-pet-cfg__card',
+          children: [
+            cardHead(t('presenterTitle'), t('presenterHint')),
+            field(
+              t('presenterLabel'),
+              h('select', {
+                className: inputClass,
+                value: presenter,
+                disabled: busy,
+                onChange: (e: ChangeEvent<HTMLSelectElement>) => {
+                  const v = e.target.value;
+                  if (v === 'pet' || v === 'toast' || v === 'both') setPresenter(v);
+                },
+                children: [
+                  h('option', { value: 'pet', children: t('presenterPet') }),
+                  h('option', { value: 'toast', children: t('presenterToast') }),
+                  h('option', { value: 'both', children: t('presenterBoth') }),
+                ],
+              }),
+              undefined,
+              true,
+            ),
           ],
         }),
 

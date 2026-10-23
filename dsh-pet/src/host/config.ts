@@ -791,6 +791,11 @@ export function saveUserConfig(
   // 与 chatMemoryRounds 同一套语义——传了就校验后进白名单，没传则走下面的透传保留。
   const cil = o.chatImageLimit;
   if (cil !== undefined && !topFieldValid('chatImageLimit', cil)) return null;
+  // presenter（渲染档位，ADR-001；设置页「数据源」卡上方的下拉框写的就是它）：
+  // 与上面数值字段同语义——传了就校验（topFieldValid 的三枚举）后进白名单，
+  // 没传则走下面的透传保留（手编过的 toast 档不会被设置页保存抹回默认）。
+  const pr = o.presenter;
+  if (pr !== undefined && !topFieldValid('presenter', pr)) return null;
   const cleanModel = (v: Record<string, unknown>): { provider: string; model: string } => ({
     provider: String(v.provider).trim(),
     model: String(v.model).trim(),
@@ -810,6 +815,8 @@ export function saveUserConfig(
   // 数值归一化落盘：请求体传 "9" 也存成 9（与读取侧 topFieldValid 的 Number() 口径一致）
   if (cmr !== undefined) outConfig.chatMemoryRounds = Number(cmr);
   if (cil !== undefined) outConfig.chatImageLimit = Number(cil);
+  // presenter：字符串枚举，原样落盘（topFieldValid 已限 pet/toast/both）
+  if (pr !== undefined) outConfig.presenter = pr;
   // 透传保留：请求体未携带的顶层字段，从 existing（磁盘现有用户文件）原样带回——
   // 设置页只提交 pets(+全局开关+physics+模型+对话历史条数)，手改的 whisperPrompt/memes/... 借此保住。
   // 白名单字段只在「请求体传了」时才算白名单（已由上方写入）；未传时走这里透传磁盘旧值——
@@ -826,6 +833,7 @@ export function saveUserConfig(
   if (cm !== undefined) bodyOwned.add('chatModel');
   if (cmr !== undefined) bodyOwned.add('chatMemoryRounds');
   if (cil !== undefined) bodyOwned.add('chatImageLimit');
+  if (pr !== undefined) bodyOwned.add('presenter');
   if (existing && typeof existing === 'object') {
     for (const key of Object.keys(existing)) {
       if (bodyOwned.has(key)) continue; // 白名单字段由请求体决定

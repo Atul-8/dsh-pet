@@ -356,6 +356,43 @@ describe('saveUserConfig —— 系统托盘开关（trayEnabled）', () => {
   });
 });
 
+describe('saveUserConfig —— 渲染档位（presenter，ADR-001 阶段二）', () => {
+  test('非法值整包拒绝（三枚举外一律 400，不静默丢用户输入）', () => {
+    assert.equal(saveUserConfig({ pets: PETS, presenter: 'nope' }, undefined), null);
+    assert.equal(saveUserConfig({ pets: PETS, presenter: 'pet-toast' }, undefined), null);
+    assert.equal(saveUserConfig({ pets: PETS, presenter: 42 }, undefined), null);
+  });
+
+  test('合法三值 → 白名单写入；没带 → 透传磁盘旧值（手编的 toast 档不被保存抹掉）', () => {
+    for (const v of ['pet', 'toast', 'both'] as const) {
+      const out = saveUserConfig({ pets: PETS, presenter: v }, undefined) as Record<string, unknown>;
+      assert.equal(out.presenter, v);
+    }
+    const passthrough = saveUserConfig({ pets: PETS }, { presenter: 'toast' }) as Record<string, unknown>;
+    assert.equal(passthrough.presenter, 'toast', '请求体没带 presenter 时磁盘上的 toast 必须原样保留');
+  });
+
+  test('请求体带了 → 以请求体为准（覆盖磁盘旧值）', () => {
+    const out = saveUserConfig({ pets: PETS, presenter: 'pet' }, { presenter: 'toast' }) as Record<string, unknown>;
+    assert.equal(out.presenter, 'pet');
+  });
+
+  test('读写往返：saveUserConfig 写 toast → readAllConfig 合并后 main.presenter = toast（基座键兜底）', () => {
+    // 测试基座 BASE 没有 presenter 基座键（mergeEntry 只遍历 base 的键集合）——
+    // 这里在临时 default.jsonc 里补上基座键再写用户层，与 assets/config.jsonc 的
+    // 显式 "presenter": "pet" 同一结构（那正是本次实测踩到的坑）。
+    const { paths, dir } = pathsWithUser(null);
+    try {
+      const withKey = { ...BASE, presenter: 'pet' };
+      writeFileSync(paths.defaultFile, JSON.stringify(withKey));
+      writeFileSync(paths.userFile, JSON.stringify(saveUserConfig({ pets: PETS, presenter: 'toast' })));
+      assert.equal(readAllConfig(paths).main.presenter, 'toast');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('JSONC 配置读取：字符串中的注释标记与转义', () => {
   const prompts = [
     '请原样解释 // 示例 这段文字',
