@@ -111,5 +111,13 @@ v1 徽标仍单槽 last-write-wins；`source` 字段提供出处（tooltip 显�
 ## 6. 开放问题
 
 - Q1 多槽徽标（每源一颗）：是否做、何时做。
-- Q2 `builtin-webview` 的登录窗是否要支持「学习到的 API」导出给油猴复用（一处学习，多方投喂）。
+- Q2 `builtin-webview` 的「学习到的 API」导出给油猴复用（一处学习，多方投喂）。
+  **学习本体已落地（v1.1，随 0.4.0）**：登录窗抓包会话（Electron 侧
+  `source:learn-start/list/stop`，webRequest 被动观察同源 XHR）→ 学习文件
+  `$DSH_HOME/dsh-pet/source-api-<id>.json`（`{version, method, url, countPath}`，
+  只记 HTTP 语义层，无凭证；写入端同源双保险）→ 看门人 tick 探活成功后按学到的
+  API 无窗口取数（`source:fetch-json`），`countPath` 从响应 JSON 挖出真实待办数
+  投桥——挖不到/取失败回落哨兵数字 1（学习是增强件，坏了不炸轮询）。
+  host 侧纯逻辑在 `src/host/learned-api.ts`（读写校验挖数一体，24 用例钉住）。
+  剩余半截：**导出面**（学习文件如何交给油猴脚本）——等油猴侧真有消费方再定。
 - Q3 active 适配器的并发上限（多源同时轮询时的节流策略）。

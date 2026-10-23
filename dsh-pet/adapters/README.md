@@ -51,7 +51,10 @@ Chromium persist 分区（宿主全程不碰密码），每 `intervalMs` 无窗�
 ```
 
 - 需要**桌面模式开着**（Electron Helper 在跑才有会话能力；纯 web 用户配了会一直显示 unknown——环境事实，不是故障）
-- 徽标数字 v1 是哨兵值（看门人在岗 = 1）；真实 API 学习（自动抓真实待办数）见 ADR-002 v1.1
+- 徽标数字：**v1.1 起 API 学习可用**——登录窗里打开目标页面后，宿主经学习会话抓到
+  待办 API（同源 XHR 的 method+url+countPath，落 `~/.dsh/dsh-pet/source-api-<id>.json`，
+  绝不含凭证），看门人每拍按学到的 API 取**真实待办数**；没学过 / 取失败则回落哨兵值 1
+  （看门人在岗）。学习文件可手查可删，坏了自动回落。详见 ADR-002 Q2。
 - `intervalMs` 需 ≥5000（防打爆目标站点），缺省 60s
 
 ---

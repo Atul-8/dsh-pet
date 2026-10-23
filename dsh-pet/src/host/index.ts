@@ -2916,6 +2916,9 @@ export function apply(ctx: any): void {
         sourceRegistry.markSourceExpired(id, reason);
         refreshSourcesLeaf(); // expired 是可见状态变化：立即上屏，不等下一拍
       },
+      // 学习文件根（$DSH_HOME/dsh-pet）：learned-api.ts 的读写基准——与 main-config
+      // 同目录，「源配置 + 源学习成果」放一处（学习文件不是手编对象，但用户可查可删）。
+      userRoot,
       logger: ctx.logger,
     };
     function tick(): void {

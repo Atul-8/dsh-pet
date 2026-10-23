@@ -1,0 +1,39 @@
+feat(sources): v1.1 API 学习——看门人从哨兵数字到真实待办数（ADR-002 Q2 前半）
+
+builtin-webview 源的徽标此前是哨兵数字 1（看门人在岗）。本轮把
+「登录窗抓包 → 学习文件 → 轮询取真数」整条链路落地：
+
+host 侧（纯逻辑，可单测）：
+- src/host/learned-api.ts（新）：学习文件
+  $DSH_HOME/dsh-pet/source-api-<id>.json 的读/写/校验/挖数。
+  形状 {version:1, method:GET|POST, url, countPath}——只记 HTTP
+  语义层，无 headers/凭证（webRequest 钩子物理上只给 method+url）。
+  写入端同源双保险（学习窗只能学源站点自己的 API）；读取端独立
+  校验（磁盘谁都能改）：非法 JSON / 缺字段 / 超长 / 坏 countPath
+  一律 undefined 静默回落。extractCount 按点号路径挖数字叶子，
+  挖不到给 undefined 绝不投 NaN。
+- webview-source.ts：tick 探活 authed:true 后，有学习文件 →
+  经 helper 的 source:fetch-json 取响应 JSON → extractCount 挖真
+  count，label 从「看门人」换成源 id；没学过/取失败/挖不到 →
+  回落哨兵数字 1 + warn（学习是增强件，坏了不炸轮询）。
+- index.ts 装配：deps.userRoot 接线（学习文件与 main-config 同目录）。
+
+Electron 侧（runtime/electron-helper/main.js）：
+- source:fetch-json（新）：同一 persist 分区无窗口取数，256KB 响应
+  上限，JSON.parse 后整个递回宿主（countPath 挖数在宿主侧，本进程
+  不解释业务形状）。20s 硬超时，与探活同一套 net.request 模式。
+- source:learn-start / learn-list / learn-stop（新）：学习会话——
+  在登录窗上挂 webRequest.onBeforeRequest 被动观察同源 XHR
+  （resourceType xhr/fetch，主文档与资源不记），抓 {method,url}
+  去重清单；学完摘钩。宿主侧学习 UI 消费 learn-list（「选哪条」
+  的交互留宿主，本进程不做 UI 决策）。
+
+测试：+17（learned-api.test.ts 13 + webview-source 消费矩阵 5 减
+1 重写）→ 1081/0。踩坑存档：webview-source 测试的 tempRoot 全文件
+共享，用例必须用独立 id（否则「无学习文件」用例吃到前序用例落的
+文件——按 node:test 并发顺序首坑，实际失败为 label=w ≠ 看门人）。
+
+文档：ADR-002 Q2 标注学习本体落地（剩导出面待油猴消费方）；
+adapters/README 徽标数字条目从「v1 哨兵」更新为「v1.1 学习可用」。
+
+门禁：tsc / lint / format / bundle（desktop-core 连带）/ check-openapi / 1081 测试全绿。

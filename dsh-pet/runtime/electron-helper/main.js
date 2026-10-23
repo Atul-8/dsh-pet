@@ -1113,6 +1113,126 @@ app.whenReady().then(() => {
     return { ok: true };
   });
 
+  // ---------- v1.1 API 学习（ADR-002 开放问题 Q2 前半）：登录窗抓包 ----------
+  //
+  // 学习会话 = 在登录窗上被动观察 XHR（webRequest.onBeforeRequest），用户在窗里
+  // 正常操作站点（打开待办列表页等）；点「完成抓取」后宿主把候选端点列给用户选
+  // 一直是完整交互——v1.1 最小形态：抓包只收 {method, url}（HTTP 语义层面，无
+  // headers/凭证），「选哪条」由宿主侧学习端点决定（本进程不做 UI 决策）。
+  // 学习窗与登录窗同一 persist 分区 → 会话天然可用；抓到的 URL 落盘前由宿主
+  // 校验同源（learned-api.ts 的 writeLearnedApi），双重防线。
+  //
+  // 抓包缓冲：sourceId -> Map<urlKey, {method, url, ts}>（去重按 method+url）
+  const learnCaptures = new Map();
+
+  invokeHandlers.set('source:learn-start', async (payload) => {
+    const id = payload && typeof payload === 'object' ? String(payload.id || '') : '';
+    const url = payload && typeof payload === 'object' ? String(payload.url || '') : '';
+    if (!id || !/^https?:[/][/]/.test(url)) return { ok: false, reason: 'bad-request' };
+    // 抓包跑在既有登录窗上（没有就开一个）：用户在窗里点到目标页面，XHR 自然流过
+    const win = sourceLoginWins.get(id);
+    const target = win && !win.isDestroyed() ? win : null;
+    if (!target) return { ok: false, reason: 'login-window-not-open' };
+    // 清旧会话：一次 start 一份新清单（重学重抓）
+    const captured = new Map();
+    learnCaptures.set(id, captured);
+    const ses = target.webContents.session;
+    const origin = new URL(url).origin;
+    // onBeforeRequest 是全局过滤器（按 URL 前缀过滤）：只记同源 + XHR（过滤主文档/
+    // 资源）。resourceType 有 'xhr'/'fetch' 两种都算 API 流量。
+    const filter = { urls: [origin + '/*'] };
+    const listener = (details) => {
+      if (details.resourceType !== 'xhr' && details.resourceType !== 'fetch') return;
+      const key = details.method + ' ' + details.url;
+      if (!captured.has(key)) captured.set(key, { method: details.method, url: details.url, ts: Date.now() });
+    };
+    try {
+      // Electron 的 webRequest API：同一 session 的同前缀过滤器不可叠加——先清本源旧钩子
+      //（学习会话本来就是我们挂的，摘掉无副作用）
+      ses.webRequest.onBeforeRequest(filter, listener);
+    } catch {
+      return { ok: false, reason: 'hook-failed' };
+    }
+    return { ok: true };
+  });
+
+  // 学习抓包清单（宿主学习 UI 用）：method+url 去重后的候选端点数组
+  invokeHandlers.set('source:learn-list', async (payload) => {
+    const id = payload && typeof payload === 'object' ? String(payload.id || '') : '';
+    const captured = learnCaptures.get(id);
+    if (!captured) return { ok: true, items: [] };
+    return { ok: true, items: [...captured.values()].sort((a, b) => b.ts - a.ts) };
+  });
+
+  // 学习会话收尾：摘钩子（关窗时自动，也可显式）
+  invokeHandlers.set('source:learn-stop', async (payload) => {
+    const id = payload && typeof payload === 'object' ? String(payload.id || '') : '';
+    const win = sourceLoginWins.get(id);
+    if (win && !win.isDestroyed()) {
+      try {
+        win.webContents.session.webRequest.onBeforeRequest(
+          { urls: [new URL(win.webContents.getURL() || 'https://x.invalid').origin + '/*'] },
+          null,
+        );
+      } catch {}
+    }
+    learnCaptures.delete(id);
+    return { ok: true };
+  });
+
+  // ---------- v1.1 API 学习（消费侧）：按学习到的端点无窗口取数 ----------
+  //
+  // 宿主 webview-source.ts 的 tick 在探活 authed:true 后调这里：同一 persist 分区
+  // 里 fetch 学到的 API（cookie 自动携带），把响应 JSON 整个递回宿主——countPath
+  // 的挖数在宿主侧（learned-api.ts 的 extractCount），本进程不解释业务形状。
+  invokeHandlers.set('source:fetch-json', async (payload) => {
+    const id = payload && typeof payload === 'object' ? String(payload.id || '') : '';
+    const method = payload && typeof payload === 'object' ? String(payload.method || 'GET').toUpperCase() : 'GET';
+    const url = payload && typeof payload === 'object' ? String(payload.url || '') : '';
+    if (!id || (method !== 'GET' && method !== 'POST') || !/^https?:[/][/]/.test(url)) {
+      return { ok: false, reason: 'bad-request' };
+    }
+    const ses = electronApi.session.fromPartition(sourcePartitions(id));
+    return await new Promise((resolve) => {
+      let settled = false;
+      let to = null;
+      const chunks = [];
+      const finish = (r) => {
+        if (settled) return;
+        settled = true;
+        if (to) clearTimeout(to);
+        try {
+          req.abort();
+        } catch {}
+        resolve(r);
+      };
+      const req = electronApi.net.request({ url, method, session: ses });
+      to = setTimeout(() => finish({ ok: false, reason: 'timeout' }), 20000);
+      req.on('response', (response) => {
+        const s = response.statusCode;
+        if (s !== 200) {
+          finish({ ok: false, reason: 'http-' + s, status: s });
+          return;
+        }
+        response.on('data', (chunk) => {
+          // 上限 256KB：待办数接口的 JSON 不会更大；超限截断会让 JSON.parse 失败 → 宿主回落哨兵
+          if (chunks.length < 262144) chunks.push(chunk);
+        });
+        response.on('end', () => {
+          const body = chunks.join('');
+          try {
+            finish({ ok: true, json: JSON.parse(body) });
+          } catch {
+            finish({ ok: false, reason: 'bad-json' });
+          }
+        });
+        response.on('error', () => finish({ ok: false, reason: 'read-error' }));
+      });
+      req.on('error', (e) => finish({ ok: false, reason: String(e && e.message ? e.message : e) }));
+      req.end();
+    });
+  });
+
   // 显示器热更新：分辨率/缩放变化、插拔屏、旋转都会让桌面几何失效。原先几何只在
   // createPetWindows() 算一次并经 URL query 注入，渲染端 VIEW 是模块顶层常量，运行期永不更新——
   // 表现为「改了分辨率后可移动范围还是旧的」。这里重算并推给所有窗口，渲染端就地重挂。

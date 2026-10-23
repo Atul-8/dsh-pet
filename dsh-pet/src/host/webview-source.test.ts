@@ -13,11 +13,19 @@ interface Harness {
   expired: Map<string, string>;
   loginOpens: string[];
   probeResults: Map<string, { ok: boolean; authed?: boolean }>;
+  /** source:fetch-json 的可编程回包（v1.1 学习消费） */
+  fetchJsonResults: Map<string, { ok: boolean; json?: unknown }>;
   warnings: string[];
   handle: WebviewSourceHandle;
 }
 
 const DECL: SourceDecl = { type: 'builtin-webview', id: 'w', feed: 'badge', intervalMs: 50, url: 'https://x.test/' };
+
+/** 测试临时目录（学习文件落盘用；node:test 的每个用例自己换子目录防串） */
+const { mkdtempSync, rmSync, writeFileSync, mkdirSync } = await import('node:fs');
+const { tmpdir } = await import('node:os');
+const { join } = await import('node:path');
+let tempRoot = '';
 
 function makeHarness(decl: SourceDecl = DECL, preProbe?: { ok: boolean; authed?: boolean }): Harness {
   const posts: { url: string; body: string }[] = [];
@@ -25,6 +33,7 @@ function makeHarness(decl: SourceDecl = DECL, preProbe?: { ok: boolean; authed?:
   const loginOpens: string[] = [];
   const warnings: string[] = [];
   const probeResults = new Map<string, { ok: boolean; authed?: boolean }>();
+  const fetchJsonResults = new Map<string, { ok: boolean; json?: unknown }>();
   if (preProbe) probeResults.set(decl.id, preProbe); // 首拍同步微任务就要读：必须先于 startWebviewSource
   const deps: WebviewSourceDeps = {
     bridgeOrigin: 'http://127.0.0.1:9999',
@@ -33,11 +42,14 @@ function makeHarness(decl: SourceDecl = DECL, preProbe?: { ok: boolean; authed?:
         loginOpens.push(String((payload as { id?: string }).id));
         return { ok: true };
       }
+      if (channel === 'source:fetch-json')
+        return fetchJsonResults.get(String((payload as { id?: string }).id)) ?? undefined;
       return probeResults.get(String((payload as { id?: string }).id)) ?? undefined;
     },
     markSourceExpired: (id, reason) => {
       expired.set(id, reason);
     },
+    userRoot: tempRoot,
     logger: {
       warn: (...a: unknown[]) => warnings.push(a.map(String).join(' ')),
       info: () => {},
@@ -52,6 +64,7 @@ function makeHarness(decl: SourceDecl = DECL, preProbe?: { ok: boolean; authed?:
     expired,
     loginOpens,
     probeResults,
+    fetchJsonResults,
     warnings,
     handle: undefined as unknown as WebviewSourceHandle,
   };
@@ -71,9 +84,11 @@ test.before(() => {
     h?.posts.push({ url: String(url), body: String(init?.body ?? '') });
     return new Response('{"ok":true}', { status: 200 });
   }) as typeof fetch;
+  tempRoot = mkdtempSync(join(tmpdir(), 'dsh-pet-wv-'));
 });
 test.after(() => {
   globalThis.fetch = realFetch;
+  rmSync(tempRoot, { recursive: true, force: true });
 });
 
 test('cookie 活 → 桥环回投喂（POST /badge 带 source=id 与哨兵数字）', async () => {
@@ -159,4 +174,102 @@ test('intervalMs 缺省 60s：decl 不带 intervalMs 时不在短窗内二拍（
   await waitTick(150); // 60s 间隔 → 只该有首拍（tick 立即跑一次）
   h.handle.stop();
   assert.equal(h.posts.length, 1, '首拍立即，第二拍在 60s 后（测试窗口内不可见）');
+});
+
+// ---------- v1.1 API 学习（ADR-002 开放问题 Q2 前半）：学习文件消费矩阵 ----------
+
+/** 落一份学习文件到 tempRoot（decl.id + method/url/countPath） */
+const putLearned = (id: string, api: { method?: string; url?: string; countPath?: string }): void => {
+  mkdirSync(tempRoot, { recursive: true });
+  writeFileSync(
+    join(tempRoot, `source-api-${id}.json`),
+    JSON.stringify({
+      version: 1,
+      method: api.method ?? 'GET',
+      url: api.url ?? 'https://x.test/api/todos',
+      countPath: api.countPath ?? 'data.pending',
+      learnedAt: Date.now(),
+    }),
+  );
+};
+
+test('v1.1 有学习文件且取数成功 → 投真实 count（countPath 挖数）+ label=id', async () => {
+  putLearned('w', { countPath: 'data.pending' });
+  const h = makeHarness();
+  (globalThis as { __wv?: Harness }).__wv = h;
+  h.probeResults.set('w', { ok: true, authed: true });
+  h.fetchJsonResults.set('w', { ok: true, json: { data: { pending: 7 } } });
+  await waitTick();
+  h.handle.stop();
+  const last = h.posts[h.posts.length - 1];
+  const body = JSON.parse(last.body) as { count?: number; label?: string };
+  assert.equal(body.count, 7, '挖出真数字');
+  assert.equal(body.label, 'w', '有学习成果后 label 从「看门人」换成源 id');
+});
+
+test('v1.1 无学习文件 → 哨兵数字（count=1, label=看门人）——老行为不变', async () => {
+  // id 用例隔离：tempRoot 是全文件共享的，别的用例可能给 'w' 落过学习文件——
+  // 这里换独立 id（无 decl 冲突：probeResults/fetchJsonResults 都按 id 命中）
+  const h = makeHarness({
+    type: 'builtin-webview',
+    id: 'no-learn',
+    feed: 'badge',
+    intervalMs: 50,
+    url: 'https://x.test/',
+  });
+  (globalThis as { __wv?: Harness }).__wv = h;
+  h.probeResults.set('no-learn', { ok: true, authed: true });
+  await waitTick();
+  h.handle.stop();
+  const body = JSON.parse(h.posts[h.posts.length - 1].body) as { count?: number; label?: string };
+  assert.equal(body.count, 1, '哨兵数字');
+  assert.equal(body.label, '看门人');
+});
+
+test('v1.1 学习文件在但 fetch-json 失败 → 回落哨兵数字（学习是增强件，坏了不炸轮询）', async () => {
+  putLearned('w', {});
+  const h = makeHarness();
+  (globalThis as { __wv?: Harness }).__wv = h;
+  h.probeResults.set('w', { ok: true, authed: true });
+  h.fetchJsonResults.set('w', { ok: false });
+  await waitTick();
+  h.handle.stop();
+  const body = JSON.parse(h.posts[h.posts.length - 1].body) as { count?: number };
+  assert.equal(body.count, 1, '回落哨兵');
+  assert.ok(
+    h.warnings.some((w) => w.includes('取数失败')),
+    '有 warn 记录回落原因',
+  );
+});
+
+test('v1.1 响应里挖不到 countPath → 回落哨兵数字', async () => {
+  putLearned('w', { countPath: 'data.nope.missing' });
+  const h = makeHarness();
+  (globalThis as { __wv?: Harness }).__wv = h;
+  h.probeResults.set('w', { ok: true, authed: true });
+  h.fetchJsonResults.set('w', { ok: true, json: { other: { shape: 3 } } });
+  await waitTick();
+  h.handle.stop();
+  const body = JSON.parse(h.posts[h.posts.length - 1].body) as { count?: number };
+  assert.equal(body.count, 1, '挖不到回落');
+});
+
+test('v1.1 学习文件坏形状（非法 JSON / 缺字段）→ 当作没学过：哨兵 + label=看门人', async () => {
+  const h = makeHarness({
+    type: 'builtin-webview',
+    id: 'bad-learn',
+    feed: 'badge',
+    intervalMs: 50,
+    url: 'https://x.test/',
+  });
+  mkdirSync(tempRoot, { recursive: true });
+  writeFileSync(join(tempRoot, 'source-api-bad-learn.json'), '{bad json');
+  (globalThis as { __wv?: Harness }).__wv = h;
+  h.probeResults.set('bad-learn', { ok: true, authed: true });
+  h.fetchJsonResults.set('bad-learn', { ok: true, json: { data: { pending: 99 } } }); // 有回包也不该被用
+  await waitTick();
+  h.handle.stop();
+  const body = JSON.parse(h.posts[h.posts.length - 1].body) as { count?: number; label?: string };
+  assert.equal(body.count, 1);
+  assert.equal(body.label, '看门人', '坏学习文件 → 不进 fetch-json 分支（fetchJsonResults 没被消费）');
 });

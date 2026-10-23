@@ -22,6 +22,7 @@
 // unknown + 说明）。看门人依赖 Electron 会话能力，这是环境事实不是故障。
 
 import type { SourceDecl } from './sources';
+import { extractCount, readLearnedApi } from './learned-api';
 
 /** 适配器对外接口（index.ts 装配层用） */
 export interface WebviewSourceHandle {
@@ -41,6 +42,8 @@ export interface WebviewSourceDeps {
   sendToHelper(channel: string, payload: Record<string, unknown>): Promise<unknown>;
   /** 过期标记的写口：宿主把注册表里该源标记为 expired（active 源自报，不走 stale 判定） */
   markSourceExpired(id: string, reason: string): void;
+  /** 学习文件根目录（$DSH_HOME/dsh-pet；v1.1 API 学习——learned-api.ts 的读取口） */
+  userRoot: string;
   logger?: { info?: (...a: unknown[]) => void; warn?: (...a: unknown[]) => void; error?: (...a: unknown[]) => void };
 }
 
@@ -86,15 +89,41 @@ export function startWebviewSource(decl: SourceDecl, deps: WebviewSourceDeps): W
       void deps.sendToHelper('source:login-open', { id: decl.id, url: decl.url ?? '' });
       return;
     }
-    // 2. cookie 活（authed === true）→ 桥环回投喂（哨兵数字：看门人在岗；API 学习见文件尾 TODO）。
-    //    authed 缺省（5xx / 探到但判不出）→ 本拍退避：不投也不报——「不确定」不是「失效」，
-    //    下一拍重探（误报 expired 会催用户去登录一个其实还活着的会话）。
+    // 2. cookie 活（authed === true）→ 桥环回投喂。v1.1 API 学习：
+    //    有学习文件（source-api-<id>.json）→ 让 Helper 按学到的 API 无窗口取数，
+    //    用 countPath 挖出真实待办数；没学过/取失败/挖不出 → 回落哨兵数字 1
+    //    （看门人在岗至少是事实）。authed 缺省（5xx / 判不出）→ 本拍退避：不投
+    //    也不报——「不确定」不是「失效」，下一拍重探（误报 expired 会催用户去登录
+    //    一个其实还活着的会话）。
     if (probe.authed !== true) return;
+    let count = 1;
+    let label = '看门人';
+    const learned = readLearnedApi(deps.userRoot, decl.id);
+    if (learned) {
+      label = decl.id;
+      try {
+        const r = await deps.sendToHelper('source:fetch-json', {
+          id: decl.id,
+          method: learned.method,
+          url: learned.url,
+        });
+        const obj = r && typeof r === 'object' ? (r as { ok?: boolean; json?: unknown }) : undefined;
+        if (obj?.ok) {
+          const dug = extractCount(obj.json, learned.countPath);
+          if (dug !== undefined) count = dug;
+          else log.warn?.(`[dsh-pet] 源「${decl.id}」响应里挖不到 ${learned.countPath}，本拍回落哨兵数字`);
+        } else {
+          log.warn?.(`[dsh-pet] 源「${decl.id}」按学习 API 取数失败，本拍回落哨兵数字`);
+        }
+      } catch {
+        log.warn?.(`[dsh-pet] 源「${decl.id}」学习 API 请求异常，本拍回落哨兵数字`);
+      }
+    }
     try {
       await fetch(deps.bridgeOrigin + '/dsh-pet-7340/badge', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ count: 1, label: '看门人', source: decl.id }),
+        body: JSON.stringify({ count, label, source: decl.id }),
       });
     } catch (e) {
       log.warn?.(`[dsh-pet] 源「${decl.id}」桥环回失败：` + (e instanceof Error ? e.message : String(e)));
@@ -126,11 +155,9 @@ export function startWebviewSource(decl: SourceDecl, deps: WebviewSourceDeps): W
   };
 }
 
-// TODO（v1.1，ADR-002 §4 阶段三完整形态）：
-//   - API 学习：登录后让用户在登录窗里点一次「抓取」，Helper 监听 webRequest 捕获
-//     目标站点的 XHR 端点与参数（只记 URL 模板与响应形状，不记凭证），落
-//     $DSH_HOME/dsh-pet/source-api-<id>.json——轮询改打学习到的 API，badge count
-//     从哨兵数字换成真数据；
-//   - 油猴复用（ADR-002 开放问题 Q2）：学习到的 API 可导出给油猴脚本，一处学习
-//     多方投喂；
+// v1.1 后续（ADR-002 开放问题）：
+//   - 油猴复用（Q2 后半）：学习到的 API（source-api-<id>.json）可导出给油猴脚本，
+//     一处学习多方投喂——读接口已就绪，导出面待定；
 //   - 多源并发上限（Q3）：全部 active 源的 tick 错峰（interval 加 ±10% 抖动）。
+// API 学习本体已落地：登录窗抓包（main.js source:learn-start/save）+
+// host 存储（learned-api.ts）+ 本文件消费（source:fetch-json → countPath 挖数）。
