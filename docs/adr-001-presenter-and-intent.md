@@ -1,6 +1,6 @@
 # ADR-001：渲染层可替换 —— presenter 档位 + 事件意图
 
-状态：草案（待实现） · 日期：2026-10-23 · 影响包：dsh-pet 0.4.0
+状态：**已实现**（阶段一 `279dced` intent 契约+宿主；阶段二 `28b52a6` toast 层+渲染分支、`4f84df4` 设置页档位 UI） · 日期：2026-10-23 · 影响包：dsh-pet 0.4.0
 
 ## 1. 背景与动机
 
@@ -53,11 +53,11 @@
 
 配置：main 条目新增 `presenter: 'pet' | 'toast' | 'both'`（缺省 `pet`，老配置零迁移）。
 
-| 档位 | 宠物 DOM | 事件去向 |
-|---|---|---|
-| `pet` | 挂载 | 气泡/徽标/动作（现状，不动） |
-| `toast` | **不挂载** | `say` → 页内 toast；`badge` → 角落计数片 |
-| `both` | 挂载 | 双通道都走（toast 只在页面失焦时弹，复用 notify.ts 的聚焦门哲学） |
+| 档位    | 宠物 DOM   | 事件去向                                                          |
+| ------- | ---------- | ----------------------------------------------------------------- |
+| `pet`   | 挂载       | 气泡/徽标/动作（现状，不动）                                      |
+| `toast` | **不挂载** | `say` → 页内 toast；`badge` → 角落计数片                          |
+| `both`  | 挂载       | 双通道都走（toast 只在页面失焦时弹，复用 notify.ts 的聚焦门哲学） |
 
 实现落点：PetMulti 的渲染分支（同一份 /state 轮询，换 sink），不是新插件。理由：轮询循环、叶子分发、任务/会话状态机都在 PetMulti 里现成，另起插件要复制整套；而"独立第三方 presenter"路线（4.5）已由插槽机制兜底，不必本包代办。
 
@@ -65,12 +65,12 @@
 
 ### 4.2 toast 形态选型：页内浮层（弃 Web Notification）
 
-| | 页内浮层（选它） | Web Notification |
-|---|---|---|
-| 透明度/样式 | 完全可控（毛玻璃 rgba） | 系统样式 |
-| 存续 | 8s 自动收起 + 手动关 | ~5s 系统决定 |
-| 点击意图 | DOM 事件，精确路由 | 回调受限 |
-| 页面聚焦时 | 照常显示 | notify.ts 的聚焦门会**跳过**（设计矛盾） |
+|             | 页内浮层（选它）        | Web Notification                         |
+| ----------- | ----------------------- | ---------------------------------------- |
+| 透明度/样式 | 完全可控（毛玻璃 rgba） | 系统样式                                 |
+| 存续        | 8s 自动收起 + 手动关    | ~5s 系统决定                             |
+| 点击意图    | DOM 事件，精确路由      | 回调受限                                 |
+| 页面聚焦时  | 照常显示                | notify.ts 的聚焦门会**跳过**（设计矛盾） |
 
 新组件 `src/client/toast.ts`：右下角堆叠（自底向上），一条 = 文本（+可选配图缩略）+ 关闭钮；计数片 = 常驻角落小徽标（呼吸动画同 badge.ts 的 keyframes，同 tone 变量）。
 
@@ -82,8 +82,8 @@ intent:
   type: object
   properties:
     type: { enum: [open-session, open-url] }
-    sessionId: { type: string }   # open-session 必填
-    url: { type: string }          # open-url 必填，http/https（与 badge href 同口径）
+    sessionId: { type: string } # open-session 必填
+    url: { type: string } # open-url 必填，http/https（与 badge href 同口径）
 ```
 
 - 校验：形状非法 → **静默丢弃 intent，事件照投**（与 /badge 富字段同一约定）；`open-session` 的 sessionId 只做非空字符串校验（DSH 会话 id 语法不属于本包契约）。
