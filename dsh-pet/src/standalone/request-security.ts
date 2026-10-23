@@ -30,6 +30,24 @@ function publicRead(req: IncomingMessage): boolean {
   );
 }
 
+/**
+ * 公开**写**（无需 token）：只有三个第三方投喂门，与插件模式（DSH webserver 的
+ * prefix 路由）同一口径——徽标数字 / 事件气泡 / 工作状态档位。这是给**非浏览器进程**
+ * （外部脚本 / CLI 包装器）用的窄门：它们没有 Origin 头，CSRF 校验恒拒，必须显式放行。
+ * 仍受 Host 校验（只认 127.0.0.1:port / localhost:port 的直连）；GET 家族与其它
+ * POST（whisper / chat / shutdown / settings）不在其中，继续走 token。
+ */
+function publicFeed(req: IncomingMessage): boolean {
+  if (req.method !== 'POST') return false;
+  let path: string;
+  try {
+    path = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
+  } catch {
+    return false;
+  }
+  return /^\/dsh-pet-\d+\/(?:badge|broadcast|work-status)$/.test(path);
+}
+
 /** Origin/Fetch-Metadata are CSRF checks; the custom capability header also excludes HTML forms. */
 export function createRequestSecurity(): RequestSecurity {
   const token = randomBytes(32).toString('base64url');
@@ -60,6 +78,9 @@ export function createRequestSecurity(): RequestSecurity {
         return rejectRequest(res, 403, '不允许跨站请求');
       }
       try {
+        // 投喂门先判：三个 POST 窄门（badge/broadcast/work-status）给无 Origin 的
+        // 外部进程（脚本/CLI）直连放行——Host 校验已经在上层挡住跨机访问。
+        if (publicFeed(req)) return true;
         if (publicRead(req)) return true;
       } catch {
         return rejectRequest(res, 400, '请求地址无效');

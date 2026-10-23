@@ -10,7 +10,11 @@ import { publicSettings, validateSettings } from './settings';
 import type { StandaloneSettingsService } from './settings';
 import { settingsPage, settingsScript, settingsStyle } from './settings-page';
 
-export const DEFAULT_STANDALONE_PORT = 3080;
+// 默认端口对齐插件模式的**固定桥端口** 7340（host 侧 webserver 的 prefix 路由）：
+// 外部投喂方（油猴 / pi / codex / claude-code hooks…）按同一地址 POST，
+// 「装在 DSH 里」和「独立跑」对它们完全同形——零配置双模式通用。
+// 被占用时自动向后顺延（PORT_SCAN_LIMIT），与 DSH 模式的 7340~7344 候选序列一致。
+export const DEFAULT_STANDALONE_PORT = 7340;
 export const PORT_SCAN_LIMIT = 25;
 export interface StandaloneServerOptions {
   routes: RegisteredRoute[];

@@ -109,7 +109,7 @@ macOS 的 Safari/WKWebView 不认 webm 的 alpha 通道（会渲染黑底），�
 
 ```sh
 npm install -g dsh-pet        # 必须 npm 装；dsh plugin add 装进 profile，bin 不在 PATH 上
-dsh-pet-standalone            # http://127.0.0.1:3080/dsh-pet-7340/（占用则顺延）
+dsh-pet-standalone            # http://127.0.0.1:7340/dsh-pet-7340/（占用则顺延）
 dsh-pet-standalone --check    # 只体检
 dsh-pet-standalone --port 3100
 
@@ -119,8 +119,24 @@ npm run build && npm run standalone   # 仓库里（先构建）
 - **能用**：动画链、点击/拖拽/甩抛、右键菜单、多开、自定义动画与表情包、pet pack。
 - **不可用**：余额、碎碎念、对话、系统通知——返回带 `reason` 的结构化失败，不假装成功。
 - **配置**：与 DSH 同一份（`$DSH_HOME/dsh-pet/main-config.jsonc` → 包内默认）。
-- **只显示 `display` 含 `desktop`/`both` 的实例**；端口默认 3080；`Ctrl+C` 或 `POST /shutdown` 退出。
+- **只显示 `display` 含 `desktop`/`both` 的实例**；端口默认 **7340（与 DSH 插件模式的固定桥同号）**；
+  `Ctrl+C` 或 `POST /shutdown` 退出。
 - **与 DSH 内运行可同时开**，但共用 `%APPDATA%\dsh-pet-electron-helper`，可能互相踩缓存（仅告警）。
+
+### 🔌 外部程序投喂（两种模式通用）
+
+桥地址**固定不变**：`http://127.0.0.1:7340/dsh-pet-7340/`。装在 DSH 里、还是独立跑，
+对投喂方（油猴 / pi / codex / claude-code hooks / 任意脚本 CLI）完全同形——零配置切换宿主形态。
+三个公开投喂门（独立模式下无需 token，与本机直连同权）：
+
+| 端点                | 语义                       | 请求体                                                            |
+| ------------------- | -------------------------- | ----------------------------------------------------------------- |
+| `POST /badge`       | 常驻徽标数字（如待处理数） | `{ count, label?, href?, tone?, items?, source? }`                |
+| `POST /broadcast`   | 事件气泡（让宠物说一句）   | `{ text, pet, surface?, duration?, anim?, image?/url?, source? }` |
+| `POST /work-status` | 工作状态档位               | `{ state: thinking/working/.../error, task? }`                    |
+
+带 `source: "你的源id"`（需在用户配置 `sources[]` 声明）即接通数据源注册表：
+断链时徽标自动灰化、设置页显示「已断链」。不带 `source` 的投喂照常受理（匿名兼容）。
 
 ## ⌨️ 斜杠命令
 

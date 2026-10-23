@@ -113,3 +113,31 @@ test('only minimal health, settings shell and known media GET are public; public
     );
   }
 });
+
+test('third-party feed gates are public POSTs: badge/broadcast/work-status accept origin-less callers', () => {
+  const security = createRequestSecurity();
+  // 无 Origin 的外部进程（脚本 / CLI）直连三个投喂门 → 放行（Host 校验已在前面挡跨机）
+  for (const path of ['/dsh-pet-7340/badge', '/dsh-pet-7340/broadcast', '/dsh-pet-7340/work-status']) {
+    assert.equal(security.authorize(request({}, path, 'POST'), response() as unknown as ServerResponse), true, path);
+    // 带跨站标记照样拒（浏览器内的恶意页面伪造不了 fetch-metadata 的 cross-site 值）
+    assert.equal(
+      security.authorize(
+        request({ 'sec-fetch-site': 'cross-site' }, path, 'POST'),
+        response() as unknown as ServerResponse,
+      ),
+      false,
+      path,
+    );
+  }
+  // 同门但 GET 不是投喂语义（读端点仍要浏览器校验）——保持非公开
+  assert.equal(
+    security.authorize(request({}, '/dsh-pet-7340/badge', 'GET'), response() as unknown as ServerResponse),
+    true,
+    'GET 走 publicRead（浏览器可读）',
+  );
+  // 投喂门外的一个 POST（whisper 生成门）仍要 token——公开面只有这三个窄门
+  assert.equal(
+    security.authorize(request({}, '/dsh-pet-7340/whisper', 'POST'), response() as unknown as ServerResponse),
+    false,
+  );
+});
