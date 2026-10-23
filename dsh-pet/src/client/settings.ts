@@ -14,6 +14,7 @@
 import { PET_DISPLAYS } from '../shared/config';
 import { DEFAULT_FONT, FONT_PRESETS, FONT_SIZE_MAX, FONT_SIZE_MIN } from '../shared/fonts';
 import { DEFAULT_PHYSICS } from '../shared/physics';
+import { readSources, type SourcesSnapshot } from '../shared/state';
 import { NOTIFY_ICONS, reloadNotifications, requestNotificationPermission, wireNotificationClick } from './notify';
 import type { Corner, FontConfig, FontFamilyId, ModelSelection, Pet, PetDisplay, PhysicsParams } from '../shared/types';
 import type { ChangeEvent, Dispatch, FunctionComponent, SetStateAction } from 'react';
@@ -370,6 +371,18 @@ export const zh = {
   uninstallStep3:
     '3. 按需删除上面的位置：缓存类删了无影响；「插件用户数据」删了会丢配置与对话记忆（想保留就先备份其中的 main-config.jsonc）。',
   uninstallCmd: 'dsh plugin --profile {profile} remove dsh-pet',
+  // 数据源卡（ADR-002 阶段二）
+  sourcesTitle: '数据源',
+  sourcesHint:
+    '谁在喂桌宠（徽标 / 事件流）以及死活。健康由宿主每 30 秒判定一次：alive=心跳在期内；stale=超过期待间隔（徽标会灰化提示）；unknown=从未心跳；disabled=已停用。新增源 = 在用户配置 sources[] 里加一行声明（v1 手编，设置页暂不提供表单）。',
+  sourcesEmpty: '尚未声明任何数据源（用户配置里没有 sources 段）。当前匿名投喂照常工作，只是不参与健康判定。',
+  'sources.health.alive': '在线',
+  'sources.health.stale': '已断链',
+  'sources.health.unknown': '未心跳',
+  'sources.health.expired': '已失效',
+  'sources.health.disabled': '已停用',
+  sourcesNever: '从未',
+  sourcesLast: '最后心跳',
 };
 
 export const en = {
@@ -566,11 +579,23 @@ export const en = {
   uninstallStep3:
     '3. Delete the locations above as needed: cache folders are harmless; deleting "plugin user data" loses your config and chat memory (back up main-config.jsonc first if you want to keep it).',
   uninstallCmd: 'dsh plugin --profile {profile} remove dsh-pet',
+  // Data sources card (ADR-002 stage 2)
+  sourcesTitle: 'Data Sources',
+  sourcesHint:
+    'Who feeds the pet (badge / event stream) and whether they are alive. Health is judged by the host every 30s: alive = heartbeat within threshold; stale = past expected interval (badge turns gray); unknown = never seen; disabled = turned off. To add a source, append a line to the sources[] array in the user config (v1: manual edit, no form yet).',
+  sourcesEmpty:
+    'No data sources declared (no sources section in user config). Anonymous feeding still works; it just does not participate in health judgment.',
+  'sources.health.alive': 'Online',
+  'sources.health.stale': 'Stale',
+  'sources.health.unknown': 'No beat',
+  'sources.health.expired': 'Expired',
+  'sources.health.disabled': 'Disabled',
+  sourcesNever: 'never',
+  sourcesLast: 'Last beat',
 };
 
 /**
  * 制造「桌宠配置」设置页组件（工厂函数）。
- *
  * 为什么是工厂而非直接定义组件：client 半侧是 __ModuleLoader__ 单文件形态，
  * react 能力不能顶层 import，只能由 DSH 的 require('react') 在运行时注入，
  * 因此把组件依赖作为参数传入，在工厂内制造出可用的组件后再注册进设置页插槽。
@@ -1012,6 +1037,32 @@ export function makePetConfigSection(rt: {
         .then((r) => (r.ok ? r.json() : null))
         .then((p) => setPaths(p))
         .catch(() => console.warn('[dsh-pet] 读取配置文件路径失败'));
+    }, []);
+
+    // 数据源健康快照（ADR-002 阶段二，只读展示）：10s 一拍轮询 /state 的 sections.sources。
+    // 不复用 pet 容器的轮询：设置页与桌宠 overlay 是两个挂载点，各自的生命周期不同
+    // （设置页只在可见时挂载，离开即停——轮询自动终止，不占常驻开销）。
+    const [sources, setSources] = useState<SourcesSnapshot | null>(null);
+    useEffect(() => {
+      let alive = true;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const poll = async (): Promise<void> => {
+        try {
+          const r = await fetch('/dsh-pet-7340/state', { cache: 'no-store' });
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          const s = (await r.json()) as { sections?: { sources?: { data?: unknown } } };
+          const snap = readSources({ counter: 0, data: s.sections?.sources?.data ?? null });
+          if (snap && alive) setSources(snap);
+        } catch {
+          /* 老宿主（无 sources 叶子）/ 网络抖动：保留上一份，下一拍再试 */
+        }
+        if (alive) timer = setTimeout(() => void poll(), 10_000);
+      };
+      void poll();
+      return () => {
+        alive = false;
+        if (timer !== null) clearTimeout(timer);
+      };
     }, []);
 
     // 系统通知总开关（全局：写用户级配置 main-config.jsonc 的 notificationsEnabled）。
@@ -1830,6 +1881,52 @@ export function makePetConfigSection(rt: {
                 ),
               ],
             }),
+          ],
+        }),
+
+        // 数据源卡（ADR-002 阶段二，只读展示）：谁在喂桌宠 + 死活一目了然。
+        // 声明在用户配置的 sources[] 里（手编，阶段二先不做表单编辑）；健康由宿主
+        // 看门狗每 30s 判一次写进 /state，这里 10s 一拍轮询展示。断链不再静默。
+        h('div', {
+          className: 'dsh-pet-cfg__card',
+          children: [
+            cardHead(t('sourcesTitle'), t('sourcesHint')),
+            !sources || sources.list.length === 0
+              ? h('p', { className: 'dsh-pet-cfg__note', children: t('sourcesEmpty') })
+              : h('div', {
+                  className: 'dsh-pet-cfg__path',
+                  style: { display: 'flex', flexDirection: 'column', gap: '4px' },
+                  children: sources.list.map((s) => {
+                    const last = s.lastSeen ? new Date(s.lastSeen).toLocaleTimeString() : t('sourcesNever');
+                    return h('div', {
+                      key: s.id,
+                      className: 'dsh-pet-cfg__path',
+                      style: { display: 'flex', gap: '10px', alignItems: 'baseline' },
+                      children: [
+                        h('span', {
+                          style: { flex: '0 0 9em', overflow: 'hidden', textOverflow: 'ellipsis' },
+                          title: s.id,
+                          children: s.id,
+                        }),
+                        h('span', {
+                          style: {
+                            flex: '0 0 4.5em',
+                            color:
+                              s.health === 'alive'
+                                ? 'var(--dsw-alias-state-success-primary, #2e9e4f)'
+                                : s.health === 'stale' || s.health === 'expired'
+                                  ? 'var(--dsw-alias-state-error-primary, #e53935)'
+                                  : 'inherit',
+                            fontWeight: 600,
+                          },
+                          children: t('sources.health.' + s.health),
+                        }),
+                        h('span', { style: { flex: '0 0 7em' }, children: s.feed }),
+                        h('span', { style: { flex: '1' }, children: t('sourcesLast') + '：' + last }),
+                      ],
+                    });
+                  }),
+                }),
           ],
         }),
 

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         dsh-pet Zoho Desk → 桌宠待处理徽标
 // @namespace    dsh-pet
-// @version      0.6.1
-// @description  只读抓取 Zoho Desk 工单视图的待处理数，投喂本地桌宠徽标；固定端口桥(7340) + 应答体验证（防哑服务冒认端口）+ 自动学习页面真实 API
+// @version      0.7.0
+// @description  只读抓取 Zoho Desk 工单视图的待处理数，投喂本地桌宠徽标；固定端口桥(7340) + 应答体验证（防哑服务冒认端口）+ 自动学习页面真实 API + source 心跳（断链灰化）
 // @match        *://*.sensecapmx.com/*
 // @match        *://*.zoho.com/*
 // @match        *://*.zoho.com.cn/*
@@ -398,7 +398,16 @@
         return;
       }
       const s = summarize(c.all);
-      const rep = await report({ count: s.count, label: '待处理', ts: s.ts, href: LIST_URL, items: s.subjects });
+      // source 字段（v0.7，ADR-002）：声明投喂方身份 → 宿主数据源注册表刷心跳。
+      // 断链（标签丢内存/关页/登出）时徽标会灰化提示，而不是挂着旧数字装活。
+      const rep = await report({
+        count: s.count,
+        label: '待处理',
+        ts: s.ts,
+        href: LIST_URL,
+        items: s.subjects,
+        source: 'zoho-tm',
+      });
       lastLines = [
         'API ' + apiSource + ' · ' + baseNote + (rep.ok ? '' : ' ⚠ ' + rep.note),
         '视图 ' + s.total + ' 封 · 分布 ' + JSON.stringify(s.statusCount),
