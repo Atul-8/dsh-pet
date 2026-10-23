@@ -42,6 +42,9 @@ dsh-pet/package-lock.json
 # ── 临时/备份目录 ──
 temp/
 
+# ── 提交信息草稿（git commit -F 用的临时文件，绝不入库） ──
+.commit-msg*.txt
+
 # ── dsh-pet 构建产物（全部由 src/ 构建生成，不入仓库；克隆后先 npm run prepare:webm）──
 #   lib/                      tsdown bundle（lib/index.js、lib/client.js）+ tsc 声明（lib/types/*.d.ts，npm run types）
 #   runtime/electron-helper/shared-core.js  桌面共享纯逻辑（scripts/build-desktop-core.mjs 产出，window.PetShared）
