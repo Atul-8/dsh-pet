@@ -72,7 +72,7 @@
     "cordis.patch.yml"
   ],
   "scripts": {
-    "bundle": "tsdown",
+    "bundle": "tsdown && node scripts/build-desktop-core.mjs",
     "build:desktop-core": "node scripts/build-desktop-core.mjs",
     "watch": "tsdown --watch",
     "ensure:electron": "node scripts/ensure-electron.mjs",
