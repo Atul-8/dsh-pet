@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         dsh-pet Zoho Desk → 桌宠待处理徽标
 // @namespace    dsh-pet
-// @version      0.7.0
-// @description  只读抓取 Zoho Desk 工单视图的待处理数，投喂本地桌宠徽标；固定端口桥(7340) + 应答体验证（防哑服务冒认端口）+ 自动学习页面真实 API + source 心跳（断链灰化）
+// @version      0.8.0
+// @description  只读抓取 Zoho Desk 工单视图的待处理数，投喂本地桌宠徽标；固定端口桥(7340) + 应答体验证（防哑服务冒认端口）+ 自动学习页面真实 API + source 心跳（断链灰化）；配置开关（总开关「启动/暂停」+ 弹窗显隐）+ 右下固定弹窗显示状态
 // @match        *://*.sensecapmx.com/*
 // @match        *://*.zoho.com/*
 // @match        *://*.zoho.com.cn/*
@@ -35,7 +35,26 @@
   };
   const PENDING = new Set(['new', 'open', 'on hold']); // 哪些状态算「待处理」（大小写不敏感）
   const REFRESH_MS = 60 * 1000;
-  const SHOW_INDICATOR = true;
+
+  // ---- 配置（GM 持久化，菜单命令切换；默认全开） ----
+  //   enabled   = 总开关：false 时停投喂、停轮询实际工作、右下弹窗一起收起来。
+  //   showPopup = 弹窗显隐：false 时只藏右下固定弹窗，抓取与投喂照旧跑。
+  const CONFIG_KEY = 'dshPetConfig';
+  function loadConfig() {
+    try {
+      const c = GM_getValue(CONFIG_KEY, null);
+      if (c && typeof c === 'object') {
+        return { enabled: c.enabled !== false, showPopup: c.showPopup !== false };
+      }
+    } catch {}
+    return { enabled: true, showPopup: true };
+  }
+  const config = loadConfig();
+  const saveConfig = () => {
+    try {
+      GM_setValue(CONFIG_KEY, config);
+    } catch {}
+  };
 
   function log(...m) {
     console.log('[dsh-pet-desk]', ...m);
@@ -347,15 +366,22 @@
     }
   }
 
-  // ================= 4. 指示器 =================
+  // ================= 4. 右下固定弹窗（状态显示，非交互：pointer-events:none 不挡页面点击） =================
   let indicator;
   function updateIndicator(lines) {
-    if (!SHOW_INDICATOR) return;
+    // 弹窗被关 / 没有内容 / 总开关关 → 移除节点（不残留一个空的浮动 div）
+    if (!config.showPopup || !lines || lines.length === 0) {
+      if (indicator) {
+        indicator.remove();
+        indicator = null;
+      }
+      return;
+    }
     if (!indicator) {
       indicator = document.createElement('div');
       indicator.style.cssText =
-        'position:fixed;right:12px;bottom:12px;z-index:2147483647;background:rgba(17,17,17,.85);color:#7fe87f;' +
-        'font:12px/1.5 monospace;padding:6px 10px;border-radius:6px;pointer-events:none;white-space:pre;max-width:420px;overflow:hidden';
+        'position:fixed;right:12px;bottom:12px;z-index:2147483647;background:rgba(17,17,17,.88);color:#7fe87f;' +
+        'font:12px/1.5 monospace;padding:8px 12px;border:1px solid rgba(127,232,127,.25);border-radius:8px;pointer-events:none;white-space:pre;max-width:420px;overflow:hidden';
       (document.body || document.documentElement).appendChild(indicator);
     }
     indicator.textContent = lines.join('\n');
@@ -366,6 +392,11 @@
   let apiSource = learned ? '已学习' : '默认(未学习)';
 
   async function tick() {
+    // 总开关关：收弹窗 + 本拍什么都不做（interval 仍在跑，重新启动后下一拍自动恢复——无需重建定时器）
+    if (!config.enabled) {
+      updateIndicator(null);
+      return;
+    }
     if (!liveBase) await findBase();
     // 5a) 若尚未学习 API 且捕获到候选 → 逐个验证，通过即采用
     if (!learned && candidates.length > 0) {
@@ -377,7 +408,7 @@
         const v = await validateCandidate(c);
         if (v.ok) {
           saveLearned(c);
-          apiSource = '已学习 ✓';
+          apiSource = '已学习';
           break;
         }
         log('候选未通过验证：', c.url.slice(0, 120), v.status || v.error || '');
@@ -424,6 +455,23 @@
 
   // ================= 6. 菜单 =================
   GM_registerMenuCommand('dsh-pet: 立即刷新', () => tick());
+  GM_registerMenuCommand('dsh-pet: 启动 / 暂停投喂（总开关）', () => {
+    config.enabled = !config.enabled;
+    saveConfig();
+    if (config.enabled) {
+      log('已启动：恢复抓取 + 投喂');
+      tick(); // 立即跑一拍（右下弹窗随之出现）
+    } else {
+      log('已暂停：停抓取、停投喂、收弹窗（菜单再点一次恢复）');
+      updateIndicator(null);
+    }
+  });
+  GM_registerMenuCommand('dsh-pet: 显示 / 隐藏右下弹窗', () => {
+    config.showPopup = !config.showPopup;
+    saveConfig();
+    log(config.showPopup ? '右下弹窗已显示' : '右下弹窗已隐藏（抓取与投喂照旧）');
+    updateIndicator(lastLines); // 立即应用显隐（不触发一次抓取）
+  });
   GM_registerMenuCommand('dsh-pet: 重新学习接口（先打开工单列表页）', () => {
     learned = null;
     GM_setValue('deskApi', null);
@@ -445,7 +493,7 @@
       }
       u.searchParams.delete('from');
       saveLearned({ url: u.toString(), headers: {} });
-      apiSource = '手动 ✓';
+      apiSource = '手动';
       tick();
     } catch (e) {
       alert('URL 无效：' + e.message);
@@ -468,6 +516,10 @@
       lastLines.join('\n') +
         '\n\nAPI: ' +
         ((learned && learned.url) || '默认(未学习)') +
+        '\n配置: ' +
+        (config.enabled ? '启动' : '暂停') +
+        ' · 弹窗' +
+        (config.showPopup ? '显示' : '隐藏') +
         '\n（详细日志在控制台，过滤 [dsh-pet-desk]）',
     );
   });
